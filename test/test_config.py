@@ -47,3 +47,15 @@ def test_unknown_policy_rejected():
 def test_unknown_credentials_provider_rejected():
     with pytest.raises(ValueError, match=r"^credentials_provider:"):
         from_params({"entity_uuid": UUID, "credentials_provider": "x"})
+
+
+def test_non_numeric_values_name_the_key():
+    for k, v in (("identity.footprint", [1.0, "x"]), ("identity.footprint", "abcd"),
+                 ("ccs.reference_points", [0, 0, 1, None]), ("identity.height", "tall")):
+        with pytest.raises(ValueError, match=rf"^{k}:"):
+            from_params({"entity_uuid": UUID, k: v})
+
+
+def test_unknown_mode_rejected():
+    with pytest.raises(ValueError, match=r"^mode:"):
+        from_params({"entity_uuid": UUID, "mode": "MODE_FOO"})

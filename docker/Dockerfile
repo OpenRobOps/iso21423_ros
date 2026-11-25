@@ -8,7 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=iso21423 py-sdk /opt/iso21423/py-sdk
 # Jazzy/noble pip supports --break-system-packages; Humble/jammy pip does not.
-RUN if pip install --help | grep -q break-system-packages; then FLAG=--break-system-packages; fi; \
+# Humble's pip is too old to build a pyproject.toml-only (PEP 621) package, so upgrade pip there (upgrading setuptools breaks colcon test).
+RUN if pip install --help | grep -q break-system-packages; then FLAG=--break-system-packages; \
+    else pip install -U pip; fi; \
     pip install $FLAG /opt/iso21423/py-sdk
 
 FROM base AS dev
@@ -16,6 +18,7 @@ ARG ROS_DISTRO
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-pytest ros-${ROS_DISTRO}-launch-testing ros-${ROS_DISTRO}-launch-testing-ament-cmake \
     && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /ws && chmod 777 /ws
 WORKDIR /ws
 
 FROM base AS runtime

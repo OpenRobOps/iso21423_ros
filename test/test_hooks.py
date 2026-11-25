@@ -21,3 +21,15 @@ def test_bad_spec_and_missing_attr():
 def test_defaults():
     assert set(DEFAULT_SOURCES) == {"odometry", "batteryStatus", "globalPlan", "localTrajectory"}
     assert set(DEFAULT_HANDLERS) == {"move", "dock", "undock", "pauseImr", "resumeImr"}
+
+
+def test_import_time_failure_names_the_key(tmp_path, monkeypatch):
+    (tmp_path / "boom_mod.py").write_text("raise NameError('boom')\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ValueError, match=r"^k: cannot load 'boom_mod:X'.*boom"):
+        load_class("boom_mod:X", "k")
+
+
+def test_non_class_rejected():
+    with pytest.raises(ValueError, match=r"^k: cannot load 'collections:abc'"):
+        load_class("collections:abc", "k")

@@ -21,6 +21,9 @@ def load_class(spec: str, key: str) -> type:
         module, _, name = spec.partition(":")
         if not module or not name:
             raise ValueError("expected 'package.module:ClassName'")
-        return getattr(importlib.import_module(module), name)
-    except (ImportError, AttributeError, ValueError) as e:
+        cls = getattr(importlib.import_module(module), name)
+        if not isinstance(cls, type):
+            raise TypeError("not a class")
+        return cls
+    except Exception as e:  # user modules can fail in any way on import
         raise ValueError(f"{key}: cannot load '{spec}': {e}") from e

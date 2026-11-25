@@ -2,6 +2,8 @@
 import uuid
 from dataclasses import dataclass, field
 
+from iso21423.constants import OPERATING_MODES
+
 POLICIES = ("abort_new", "queue_after", "queue_replace", "parallel", "priority", "preempt")
 PROVIDERS = ("", "openrobops")
 
@@ -53,12 +55,21 @@ class ConnectorConfig:
     extensions: dict = field(default_factory=dict)
 
 
+def _num(key, v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError(f"{key}: expected a number, got {v!r}")
+    return float(v)
+
+
 def _tuples(params, key, n):
     """Group a flat numeric list into n-tuples."""
-    flat = list(params.get(key, []))
+    flat = params.get(key, [])
+    if not isinstance(flat, (list, tuple)):
+        raise ValueError(f"{key}: expected a list of numbers, got {flat!r}")
     if len(flat) % n:
         raise ValueError(f"{key}: expected a multiple of {n} numbers, got {len(flat)}")
-    return [tuple(float(v) for v in flat[i:i + n]) for i in range(0, len(flat), n)]
+    nums = [_num(key, v) for v in flat]
+    return [tuple(nums[i:i + n]) for i in range(0, len(nums), n)]
 
 
 def _nested(params, prefix):
@@ -87,6 +98,10 @@ def from_params(params: dict) -> ConnectorConfig:
     if provider not in PROVIDERS:
         raise ValueError(f"credentials_provider: must be '' or 'openrobops' (got {provider!r})")
 
+    mode = p.get("mode", "MODE_AUTO")
+    if mode not in OPERATING_MODES:
+        raise ValueError(f"mode: must be one of {', '.join(OPERATING_MODES)} (got {mode!r})")
+
     footprint = _tuples(p, "identity.footprint", 2)
     ref = _tuples(p, "ccs.reference_points", 4)
 
@@ -96,7 +111,7 @@ def from_params(params: dict) -> ConnectorConfig:
         identity=IdentityConfig(
             model=p.get("identity.model", ""),
             serial_number=p.get("identity.serial_number", ""),
-            height=float(p.get("identity.height", 0.0)),
+            height=_num("identity.height", p.get("identity.height", 0.0)),
             footprint=footprint,
             footprint_from_nav2=bool(p.get("identity.footprint_from_nav2", False)),
         ),
@@ -114,7 +129,7 @@ def from_params(params: dict) -> ConnectorConfig:
             reference_points=[((r[0], r[1]), (r[2], r[3])) for r in ref],
         ),
         base_frame=p.get("base_frame", "base_link"),
-        mode=p.get("mode", "MODE_AUTO"),
+        mode=mode,
         execution_policy=policy,
         sources=_nested(p, "sources"),
         handlers=_nested(p, "handlers"),
