@@ -1,37 +1,9 @@
-import contextlib
 import logging
 import threading
 
 import pytest
 
 from iso21423_ros.status import StatusComposer
-
-
-@pytest.fixture
-def logcap():
-    # colcon's pytest run disables the logging plugin, so the built-in caplog is empty.
-    """Own capture: colcon's pytest runs with the logging plugin disabled."""
-    class H(logging.Handler):
-        def __init__(self):
-            super().__init__()
-            self.records = []
-
-        def emit(self, record):
-            self.records.append(record)
-
-        @property
-        def text(self):
-            return "\n".join(r.getMessage() + (str(r.exc_info[1]) if r.exc_info else "")
-                             for r in self.records)
-
-        def at_level(self, level):
-            return contextlib.nullcontext()
-
-    h = H()
-    lg = logging.getLogger("iso21423_ros.status")
-    lg.addHandler(h)
-    yield h
-    lg.removeHandler(h)
 
 
 def make(mode="MODE_AUTO"):
