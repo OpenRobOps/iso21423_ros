@@ -6,8 +6,7 @@ import pytest
 
 @pytest.fixture
 def logcap():
-    # colcon's pytest run disables the logging plugin, so the built-in caplog is empty.
-    """Own capture: colcon's pytest runs with the logging plugin disabled."""
+    """Own capture: colcon's pytest runs with the logging plugin disabled, so caplog is empty."""
     class H(logging.Handler):
         def __init__(self):
             super().__init__()

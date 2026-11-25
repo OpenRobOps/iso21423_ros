@@ -174,3 +174,61 @@ def test_local_trajectory_throttled(node, monkeypatch):
     pub.fail = True
     now[0] += 1
     src._on_msg(path((3, 3)))  # must not raise
+
+
+def test_static_tf_not_lost(node):
+    t = TransformStamped()
+    t.header.frame_id, t.child_frame_id = "map", "base_link"
+    t.transform.rotation.w = 1.0  # zero stamp
+    node.tf_buffer.set_transform_static(t, "test")
+    pub = FakePub()
+    src = OdometrySource(node, pub, {})
+    src._tick()
+    assert src.states() == [] and len(pub.of("odometry")) == 1
+
+
+def test_stale_twist_cleared(node):
+    pub = FakePub()
+    src = OdometrySource(node, pub, {"lost_after_s": 2.0})
+    set_tf(node, 0.0, 0.0)
+    odom = Odometry()
+    odom.twist.twist.linear.x = 0.5
+    src._tick()
+    src._on_odom(odom)
+    assert src.states() == ["FORWARD"]
+    src._odom_at -= 3.0  # /odom went silent
+    assert src.states() == []
+    src._tick()
+    assert pub.of("odometry")[-1]["velocity"]["linear"] == 0.0
+
+
+def test_bad_plan_msg_does_not_raise(node, logcap):
+    GlobalPlanSource(node, FakePub(), {})._on_msg(object())  # plan_key blows up
+    assert logcap.records
+
+
+def test_rate_must_be_positive(node):
+    for cls in (OdometrySource, LocalTrajectorySource):
+        with pytest.raises(ValueError):
+            cls(node, FakePub(), {"rate_hz": 0})
+
+
+def test_wired_through_executor(node):
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.qos import qos_profile_sensor_data
+    pub = FakePub()
+    src = OdometrySource(node, pub, {"rate_hz": 20.0})
+    set_tf(node, 1.0, 0.0)
+    p = node.create_publisher(Odometry, "/odom", qos_profile_sensor_data)
+    ex = SingleThreadedExecutor()
+    ex.add_node(node)
+    msg = Odometry()
+    msg.twist.twist.linear.x = 0.5
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not (src.states() == ["FORWARD"] and pub.of("odometry")):
+        p.publish(msg)
+        set_tf(node, 1.0, 0.0)
+        ex.spin_once(timeout_sec=0.05)
+    ex.remove_node(node)
+    assert src.states() == ["FORWARD"]
+    assert pub.of("odometry")[-1]["velocity"]["linear"] == 0.5
