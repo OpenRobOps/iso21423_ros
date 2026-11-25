@@ -110,6 +110,7 @@ def test_custom_command_publishes_and_validates(node):
     assert (r.outcome, r.reason, r.message) == ("aborted", "MALFORMED_REQUEST",
                                                "properties.command must be a string")
     assert h.execute({"properties": {}}, ctx()).reason == "MALFORMED_REQUEST"
+    assert h.execute({"properties": "x"}, ctx()).reason == "MALFORMED_REQUEST"
     r = h.execute({"properties": {"command": "go"}}, ctx())
     assert r.outcome == "succeeded"
     ex = rclpy.executors.SingleThreadedExecutor()

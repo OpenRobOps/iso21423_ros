@@ -66,7 +66,12 @@ class CustomCommandHandler:
         self._pub = node.create_publisher(String, params.get("topic", "/inorbit/custom_command"), 10)
 
     def execute(self, action, ctx):
-        command = (action.get("properties") or {}).get("command")
+        props = action.get("properties")
+        if props is None:
+            props = {}
+        if not isinstance(props, dict):
+            return ctx.aborted("MALFORMED_REQUEST", "properties must be an object")
+        command = props.get("command")
         if not isinstance(command, str):
             return ctx.aborted("MALFORMED_REQUEST", "properties.command must be a string")
         log.info("customCommand -> %s", command)

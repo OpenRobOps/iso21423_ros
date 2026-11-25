@@ -1,8 +1,10 @@
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
+from iso21423 import Iso21423Error
 
 from iso21423_ros import credentials
 from iso21423_ros.config import from_params
@@ -16,7 +18,7 @@ def test_static_credentials_read_password_file(tmp_path):
     cfg = from_params({"entity_uuid": UUID, "broker.url": "mqtt://b:1883", "broker.username": "u",
                        "broker.password_file": str(pw), "broker.tls": True})
     c = credentials.resolve(cfg)
-    assert (c.url, c.username, c.password, c.tls) == ("mqtt://b:1883", "u", "s3cret", True)
+    assert (c.url, c.username, c.password, c.tls) == ("mqtt://b:1883", "u", "s3cret", {})
 
 
 def test_static_without_password_file():
@@ -52,7 +54,7 @@ def test_oro_provider_retries_until_200(tmp_path, logcap):
         c = credentials.resolve(cfg, sleep=sleeps.append)
     finally:
         srv.shutdown()
-    assert (c.url, c.username, c.password, c.tls) == ("mqtt://broker.example:1883", "gen-u", "gen-pw", False)
+    assert (c.url, c.username, c.password, c.tls) == ("mqtt://broker.example:1883", "gen-u", "gen-pw", None)
     assert sleeps == [10, 10]
     assert len(seen) == 3
     assert seen[0] == ("/iso_mqtt_config", {"apiKey": "API-KEY-123", "entityUuid": UUID},
@@ -75,3 +77,59 @@ def test_oro_unreachable_retries(tmp_path):
 
     with pytest.raises(Stop):
         credentials.resolve(cfg, sleep=sleep)
+
+
+def test_static_tls_false_is_none():
+    cfg = from_params({"entity_uuid": UUID, "broker.url": "mqtt://b:1883"})
+    assert credentials.resolve(cfg).tls is None
+
+
+def _oro_server(responses):
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            code, body = responses.pop(0)
+            self.send_response(code)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def _oro_cfg(tmp_path, srv):
+    key = tmp_path / "key"
+    key.write_text("k")
+    return from_params({"entity_uuid": UUID, "credentials_provider": "openrobops",
+                        "oro.url": f"http://127.0.0.1:{srv.server_port}", "oro.api_key_file": str(key)})
+
+
+def test_oro_bad_200_shapes_retry(tmp_path, logcap):
+    good = json.dumps({"hostname": "h", "port": 1, "protocol": "mqtt://", "username": "u",
+                       "password": "pw"}).encode()
+    srv = _oro_server([(200, b"not json"), (200, b'{"hostname": "h", "password": "leak-pw"}'),
+                       (200, b"[1]"), (200, good)])
+    sleeps = []
+    try:
+        c = credentials.resolve(_oro_cfg(tmp_path, srv), sleep=sleeps.append)
+    finally:
+        srv.shutdown()
+    assert c.url == "mqtt://h:1" and sleeps == [10, 10, 10]
+    assert "leak-pw" not in logcap.text
+
+
+def test_oro_stop_interrupts_retry(tmp_path):
+    srv = _oro_server([(403, b"x")] * 50)
+    stop = threading.Event()
+    threading.Timer(0.2, stop.set).start()
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(Iso21423Error, match="stopped"):
+            credentials.resolve(_oro_cfg(tmp_path, srv), stop=stop)
+    finally:
+        srv.shutdown()
+    assert time.monotonic() - t0 < 3
