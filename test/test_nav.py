@@ -26,7 +26,10 @@ class FakeNav:
     """In-process NavigateToPose server. Goals drive current_pose from (0,0) to the goal in `duration`."""
 
     def __init__(self, node, name):
-        self.duration, self.mode = 1.0, "succeed"  # mode: succeed | abort | reject
+        self.duration, self.mode = 1.0, "succeed"  # mode: succeed | abort | reject | hang
+        self.single_goal = False  # like real nav2: a new goal aborts the running one
+        self.on_preempted = None  # called just before a single_goal preemption aborts a goal
+        self.release = threading.Event()  # ends "hang" goals
         self.goals, self.cancels = [], []  # goal uuids (bytes) in arrival order
         self.server = ActionServer(node, NavigateToPose, name, execute_callback=self._exec,
                                    goal_callback=self._goal, cancel_callback=self._cancel,
@@ -40,13 +43,25 @@ class FakeNav:
         return CancelResponse.ACCEPT
 
     def _exec(self, gh):
-        self.goals.append(bytes(gh.goal_id.uuid))
+        gid = bytes(gh.goal_id.uuid)
+        self.goals.append(gid)
+        if self.mode == "hang":  # accepted, then silence: no feedback, no result
+            self.release.wait(10)
+            gh.abort()
+            return NavigateToPose.Result()
         tx, ty = gh.request.pose.pose.position.x, gh.request.pose.pose.position.y
         start = time.monotonic()
         while (f := (time.monotonic() - start) / self.duration) < 1.0:
             if gh.is_cancel_requested:
                 gh.canceled()
                 return NavigateToPose.Result()
+            if self.single_goal and self.goals[-1] != gid:
+                if self.on_preempted:
+                    self.on_preempted()
+                gh.abort()
+                res = NavigateToPose.Result()
+                res.error_code, res.error_msg = 100, "preempted"
+                return res
             fb = NavigateToPose.Feedback()
             fb.current_pose.pose.position.x, fb.current_pose.pose.position.y = tx * f, ty * f
             fb.distance_remaining = float((1 - f) * (tx * tx + ty * ty) ** 0.5)
@@ -127,6 +142,7 @@ def env(ros):
         return node.nav
 
     yield node, fake, make
+    fake.release.set()
     ex.shutdown()
     spin.join(timeout=5)
     node.destroy_node()
@@ -164,16 +180,18 @@ def test_cancel_cancels_own_goal_and_aborts_rejected(env):
 def test_pause_resume_keeps_move_executing(env):
     node, fake, make = env
     nav = make()
-    fake.duration = 1.0
+    fake.duration = 30.0  # the pause always lands while goal 1 is running
     c = Ctx()
     t, box = run_bg(nav.navigate, pose(1, 0), c.ctx)
     wait_for(lambda: fake.goals)
+    before_pause = len(node.status_out)
     assert PauseHandler(node, {}).execute({}, c.ctx).outcome == "succeeded"
     wait_for(lambda: fake.cancels == fake.goals)
     assert nav.paused and nav.states() == ["PAUSED"]
-    assert node.status_out[-1] == ["MODE_AUTO", "PAUSED"]
     time.sleep(0.5)
     assert len(fake.goals) == 1 and t.is_alive()  # objective held, no new goal while paused
+    fake.duration = 0.5
+    before_resume = len(node.status_out)
     assert ResumeHandler(node, {}).execute({}, c.ctx).outcome == "succeeded"
     assert nav.states() == []
     t.join(timeout=5)
@@ -181,6 +199,11 @@ def test_pause_resume_keeps_move_executing(env):
     assert len(fake.goals) == 2 and fake.cancels == fake.goals[:1]
     assert nav.states() == ["IDLE"] and node.status_out[-1] == ["MODE_AUTO", "IDLE"]
     assert all(s == "EXECUTING" for s, _ in c.updates)
+    # PAUSED is published exactly while paused
+    out = node.status_out
+    assert before_resume > before_pause
+    assert all("PAUSED" in st for st in out[before_pause:before_resume])
+    assert not any("PAUSED" in st for st in out[:before_pause] + out[before_resume:])
 
 
 def test_preempted_move_does_not_cancel_successor_goal(env):
@@ -227,15 +250,58 @@ def test_nav2_abort_maps_error(env):
     assert (r.outcome, r.reason, r.message) == ("aborted", "GENERAL_FAILURE", "nav2 error 104: no valid path")
 
 
+def move(x, y, **props):
+    return {"type": "move", "properties": {"location": {"x": x, "y": y}, **props}}
+
+
 def test_tolerance_radius_finishes_early(env):
-    _, fake, make = env
-    nav = make()
+    node, fake, make = env
+    make()
     fake.duration = 5.0
     start = time.monotonic()
-    r = nav.navigate(pose(10, 0), Ctx().ctx, tolerance_radius=9.0, target_xy=(10.0, 0.0))
+    r = MoveHandler(node, {}).execute(move(10.0, 0.0, toleranceRadius=9), Ctx().ctx)
     assert r.outcome == "succeeded"
     assert time.monotonic() - start < 3.0
     assert fake.cancels == fake.goals  # stopped nav2 once inside the circle
+
+
+@pytest.mark.parametrize("tol", [-1.0, "1", True, float("nan"), [1]])
+def test_invalid_tolerance_radius_aborts(env, tol):
+    node, fake, make = env
+    make()
+    r = MoveHandler(node, {}).execute(move(1.0, 0.0, toleranceRadius=tol), Ctx().ctx)
+    assert (r.outcome, r.reason) == ("aborted", "GENERAL_FAILURE") and "toleranceRadius" in r.message
+    assert fake.goals == []
+
+
+def test_server_lost_mid_goal_aborts(env):
+    _, fake, make = env
+    nav = make(server_timeout_s=0.5)
+    fake.mode = "hang"
+    t, box = run_bg(nav.navigate, pose(1, 0), Ctx().ctx)
+    wait_for(lambda: fake.goals)
+    fake.server.destroy()
+    start = time.monotonic()
+    t.join(timeout=3)
+    assert time.monotonic() - start < 2 * 0.5 + 1.0  # loss detection + timeout
+    assert (box["r"].reason, box["r"].message) == ("GENERAL_FAILURE", "navigate_to_pose server lost")
+
+
+def test_late_cancel_with_nav2_abort_reports_canceled(env):
+    """Real nav2 is single-goal: B's goal makes nav2 abort A's goal, which A sees before its cancel poll."""
+    _, fake, make = env
+    nav = make()
+    fake.duration, fake.single_goal = 1.0, True
+    a = Ctx()
+    fake.on_preempted = a.ctx.cancelled.set  # the library cancels A, and nav2 aborts A's goal right away
+    ta, box_a = run_bg(nav.navigate, pose(1, 0), a.ctx)
+    wait_for(lambda: len(fake.goals) == 1)
+    tb, box_b = run_bg(nav.navigate, pose(2, 0), Ctx().ctx)
+    ta.join(timeout=3)
+    tb.join(timeout=5)
+    assert (box_a["r"].reason, box_a["r"].message) == ("REJECTED", "canceled")
+    assert box_b["r"].outcome == "succeeded"
+    assert fake.goals[1] not in fake.cancels
 
 
 def test_external_cancel_aborts_general_failure(env):

@@ -10,7 +10,10 @@ class PauseHandler:
         return ctx.succeeded()
 
 
-class ResumeHandler(PauseHandler):
+class ResumeHandler:
+    def __init__(self, node, params):
+        self.node = node
+
     def execute(self, action, ctx):
         self.node.nav.resume()
         return ctx.succeeded()

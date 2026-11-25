@@ -143,7 +143,8 @@ class NavRunner:
             result = handle.get_result_async()
             result.add_done_callback(lambda _: wake.set())
 
-            # 3. watch cancel / pause / tolerance until the result arrives
+            # 3. watch cancel / pause / tolerance / server loss until the result arrives
+            lost_since = None
             while not result.done():
                 if ctx.cancelled.is_set():
                     done.set()
@@ -156,21 +157,23 @@ class NavRunner:
                 if self._paused:
                     done.set()
                     self._cancel(handle, result, wake)
-                    if result.done() and result.result().status == GoalStatus.STATUS_SUCCEEDED:
-                        return ctx.succeeded()  # arrived before the cancel landed
+                    if result.done() and result.result().status != GoalStatus.STATUS_CANCELED:
+                        return _map_result(ctx, result.result())  # finished/failed before our cancel landed
                     break  # back to step 1: wait for resume, then re-send
+                if self._client.server_is_ready():
+                    lost_since = None
+                elif lost_since is None:
+                    lost_since = time.monotonic()
+                elif time.monotonic() - lost_since > self.server_timeout_s:
+                    done.set()
+                    _cancel_quietly(handle)  # best effort; the server is probably gone
+                    return ctx.aborted("GENERAL_FAILURE", "navigate_to_pose server lost")
                 self._sleep(wake)
             else:
                 done.set()
-                # 4. result not caused by us
-                res = result.result()
-                if res.status == GoalStatus.STATUS_SUCCEEDED:
-                    return ctx.succeeded()
-                if res.status == GoalStatus.STATUS_CANCELED:
-                    return ctx.aborted("GENERAL_FAILURE", "goal canceled externally")
-                code = getattr(res.result, "error_code", 0)
-                msg = getattr(res.result, "error_msg", "")
-                return ctx.aborted("GENERAL_FAILURE", f"nav2 error {code}: {msg}")
+                if ctx.cancelled.is_set():  # cancelled late, e.g. a preempting goal made nav2 abort ours
+                    return canceled()
+                return _map_result(ctx, result.result())
 
     def _sleep(self, wake):
         wake.wait(_POLL_S)
@@ -183,10 +186,7 @@ class NavRunner:
 
     def _cancel(self, handle, result, wake):
         """Cancel our own goal and wait (bounded) for nav2 to finish it."""
-        try:
-            handle.cancel_goal_async()
-        except Exception:
-            log.exception("cancel of navigate_to_pose goal failed")
+        if not _cancel_quietly(handle):
             return
         if not self._wait(result, wake, deadline=time.monotonic() + self.server_timeout_s):
             log.warning("navigate_to_pose goal did not finish within %.1fs of cancel", self.server_timeout_s)
@@ -199,3 +199,23 @@ def _cancel_if_accepted(future):
             handle.cancel_goal_async()
     except Exception:
         log.exception("cancel of late-accepted navigate_to_pose goal failed")
+
+
+def _cancel_quietly(handle):
+    try:
+        handle.cancel_goal_async()
+        return True
+    except Exception:
+        log.exception("cancel of navigate_to_pose goal failed")
+        return False
+
+
+def _map_result(ctx, res):
+    """4. A result this call did not cause."""
+    if res.status == GoalStatus.STATUS_SUCCEEDED:
+        return ctx.succeeded()
+    if res.status == GoalStatus.STATUS_CANCELED:
+        return ctx.aborted("GENERAL_FAILURE", "goal canceled externally")
+    code = getattr(res.result, "error_code", 0)
+    msg = getattr(res.result, "error_msg", "")
+    return ctx.aborted("GENERAL_FAILURE", f"nav2 error {code}: {msg}")
