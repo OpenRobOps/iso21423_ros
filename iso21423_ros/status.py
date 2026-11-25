@@ -23,13 +23,14 @@ class StatusComposer:
         self._publish = publish
         self._mode = mode
         self._contributors = []
-        self._last = None
+        self._last = None  # tuple, swapped atomically after a successful publish
         self._warned = set()
         # ponytail: compute+publish under one RLock keeps published order exact (a publish
         # outside the lock could reorder); a slow broker publish blocks other refreshers.
         self._lock = threading.RLock()
 
     def add_contributor(self, fn: Callable[[], list]):
+        """fn returns a list/tuple of state strings. It must not call refresh()."""
         with self._lock:
             self._contributors.append(fn)
 
@@ -40,15 +41,16 @@ class StatusComposer:
         self.refresh()
 
     def states(self) -> list:
-        with self._lock:
-            return list(self._last or [])
+        return list(self._last or ())
 
     def refresh(self):
         with self._lock:
             seen = []
             for fn in self._contributors:
                 try:
-                    got = list(fn())
+                    got = fn()
+                    if not isinstance(got, (list, tuple)) or not all(isinstance(s, str) for s in got):
+                        raise TypeError(f"expected list/tuple of str, got {got!r}")
                 except Exception:
                     log.exception("status contributor %r failed", fn)
                     continue
@@ -62,7 +64,11 @@ class StatusComposer:
             rank = {s: i for i, s in enumerate(PRIORITY)}
             # stable sort: unknown states keep contributor order after known ones
             seen.sort(key=lambda s: rank.get(s, len(PRIORITY)))
-            new = [self._mode] + seen
+            new = tuple([self._mode] + seen)
             if new != self._last:
+                try:
+                    self._publish(list(new))
+                except Exception:
+                    log.exception("status publish failed; will retry on next refresh")
+                    return
                 self._last = new
-                self._publish(list(new))

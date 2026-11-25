@@ -8,7 +8,8 @@ from iso21423_ros.status import StatusComposer
 
 
 @pytest.fixture
-def caplog():
+def logcap():
+    # colcon's pytest run disables the logging plugin, so the built-in caplog is empty.
     """Own capture: colcon's pytest runs with the logging plugin disabled."""
     class H(logging.Handler):
         def __init__(self):
@@ -68,14 +69,14 @@ def test_vendor_state_after_known():
     assert out[-1] == ["MODE_AUTO", "IDLE", "ZZZ", "AAA"]
 
 
-def test_contributor_mode_ignored(caplog):
+def test_contributor_mode_ignored(logcap):
     c, out = make()
     c.add_contributor(lambda: ["MODE_MANUAL", "IDLE"])
-    with caplog.at_level(logging.WARNING):
+    with logcap.at_level(logging.WARNING):
         c.refresh()
         c.refresh()
     assert out[-1] == ["MODE_AUTO", "IDLE"]
-    assert len([r for r in caplog.records if "MODE_MANUAL" in r.getMessage()]) == 1
+    assert len([r for r in logcap.records if "MODE_MANUAL" in r.getMessage()]) == 1
 
 
 def test_never_emits_ready():
@@ -85,7 +86,7 @@ def test_never_emits_ready():
     assert "READY" not in out[-1] and "NOT_READY" not in out[-1]
 
 
-def test_contributor_exception_skipped_and_logged(caplog):
+def test_contributor_exception_skipped_and_logged(logcap):
     c, out = make()
 
     def bad():
@@ -93,10 +94,10 @@ def test_contributor_exception_skipped_and_logged(caplog):
 
     c.add_contributor(bad)
     c.add_contributor(lambda: ["IDLE"])
-    with caplog.at_level(logging.ERROR):
+    with logcap.at_level(logging.ERROR):
         c.refresh()
     assert out[-1] == ["MODE_AUTO", "IDLE"]
-    assert "boom" in caplog.text
+    assert "boom" in logcap.text
 
 
 def test_invalid_mode():
@@ -105,10 +106,50 @@ def test_invalid_mode():
     c, _ = make()
     with pytest.raises(ValueError):
         c.set_mode("READY")
+    assert c.states() == []
+    c.refresh()
+    with pytest.raises(ValueError):
+        c.set_mode("READY")
+    assert c.states() == ["MODE_AUTO"]
+
+
+def test_publish_failure_retried_and_not_raised(logcap):
+    calls = []
+
+    def pub(states):
+        calls.append(states)
+        if len(calls) == 1:
+            raise OSError("broker down")
+
+    c = StatusComposer(pub, "MODE_AUTO")
+    c.refresh()  # must not raise
+    assert c.states() == []
+    assert "broker down" in logcap.text
+    c.refresh()
+    assert len(calls) == 2 and c.states() == ["MODE_AUTO"]
+
+
+def test_bad_contributor_output_skipped(logcap):
+    c, out = make()
+    c.add_contributor(lambda: [None])
+    c.add_contributor(lambda: "IDLE")
+    c.add_contributor(lambda: ("LOST",))
+    c.refresh()
+    assert out[-1] == ["MODE_AUTO", "LOST"]
+    assert len(logcap.records) == 2
 
 
 def test_concurrent_refresh_publishes_in_order():
-    c, out = make()
+    out = []
+    inflight = [0, 0]  # current, max
+
+    def pub(states):
+        inflight[0] += 1
+        inflight[1] = max(inflight[1], inflight[0])
+        out.append(states)
+        inflight[0] -= 1
+
+    c = StatusComposer(pub, "MODE_AUTO")
     cur = ["IDLE"]
     c.add_contributor(lambda: list(cur))
 
@@ -122,3 +163,4 @@ def test_concurrent_refresh_publishes_in_order():
     [t.join() for t in ts]
     assert c.states() == out[-1]
     assert all(a != b for a, b in zip(out, out[1:]))
+    assert inflight[1] == 1
