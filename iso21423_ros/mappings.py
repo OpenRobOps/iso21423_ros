@@ -54,9 +54,9 @@ def nav_goal_pose(frame, location, yaw, map_frame):
     x, y = frame.to_map(location["x"], location["y"])
     msg = PoseStamped()
     msg.header.frame_id = map_frame
-    msg.pose.position.x, msg.pose.position.y = x, y
+    msg.pose.position.x, msg.pose.position.y = float(x), float(y)
     q = quaternion_from_yaw(frame.yaw_to_map(yaw or 0.0))
-    msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w = q
+    msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w = map(float, q)
     return msg
 
 

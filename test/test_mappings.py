@@ -47,7 +47,7 @@ def _path(xy, sec=0):
     for x, y in xy:
         ps = PoseStamped()
         ps.header.stamp.sec = sec
-        ps.pose.position.x, ps.pose.position.y = x, y
+        ps.pose.position.x, ps.pose.position.y = float(x), float(y)
         p.poses.append(ps)
     return p
 

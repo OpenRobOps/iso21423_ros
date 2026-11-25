@@ -69,7 +69,8 @@ class FakeNav:
             time.sleep(0.05)
         res = NavigateToPose.Result()
         if self.mode == "abort":
-            res.error_code, res.error_msg = 104, "no valid path"
+            if hasattr(res, "error_code"):  # absent from NavigateToPose on Humble
+                res.error_code, res.error_msg = 104, "no valid path"
             gh.abort()
         else:
             gh.succeed()
@@ -247,7 +248,8 @@ def test_nav2_abort_maps_error(env):
     nav = make()
     fake.duration, fake.mode = 0.2, "abort"
     r = nav.navigate(pose(1, 0), Ctx().ctx)
-    assert (r.outcome, r.reason, r.message) == ("aborted", "GENERAL_FAILURE", "nav2 error 104: no valid path")
+    want = "nav2 error 104: no valid path" if hasattr(NavigateToPose.Result(), "error_code") else "nav2 error 0: "
+    assert (r.outcome, r.reason, r.message) == ("aborted", "GENERAL_FAILURE", want)
 
 
 def move(x, y, **props):
