@@ -29,7 +29,7 @@ def _import_actions():
     return DockRobot, UndockRobot
 
 
-def _run_goal(client, goal, ctx, timeout, label):
+def _run_goal(client, goal, ctx, timeout, label, server="docking server"):
     """Send goal, wait for its result, map it to an ActionResult. Cancels only its own handle."""
     wake = threading.Event()
 
@@ -47,7 +47,7 @@ def _run_goal(client, goal, ctx, timeout, label):
         if ctx.cancelled.is_set():
             return canceled()
         if time.monotonic() >= deadline:
-            return ctx.aborted("GENERAL_FAILURE", f"{label} server unavailable")
+            return ctx.aborted("GENERAL_FAILURE", f"{server} unavailable")
         ctx.cancelled.wait(_POLL_S)
 
     send = client.send_goal_async(goal)
@@ -74,7 +74,7 @@ def _run_goal(client, goal, ctx, timeout, label):
             lost_since = time.monotonic()
         elif time.monotonic() - lost_since > timeout:
             _cancel_quietly(handle)
-            return ctx.aborted("GENERAL_FAILURE", f"{label} server lost")
+            return ctx.aborted("GENERAL_FAILURE", f"{server} lost")
         wake.wait(_POLL_S)
         wake.clear()
     if ctx.cancelled.is_set():
@@ -107,7 +107,8 @@ def _check_params(params, prefix, keys):
     out = {}
     for key, default in keys.items():
         v = params.get(key, default)
-        if not isinstance(v, type(default)) and not (isinstance(default, float) and isinstance(v, int)):
+        number = isinstance(v, (int, float)) and not isinstance(v, bool)
+        if not (number if isinstance(default, float) else isinstance(v, type(default))):
             raise ValueError(f"handlers.{prefix}.{key}: expected {type(default).__name__}, got {v!r}")
         out[key] = v
     return out
@@ -126,6 +127,8 @@ class DockHandler:
         self._lock = threading.Lock()  # leaf lock: guards _active updates only
         self._actions = _import_actions() if self.mode != "navigate" else None
         self._client = None
+        if self.mode == "docking_server" and not self._actions:
+            log.warning("handlers.dock.mode is docking_server but nav2_msgs DockRobot is not available")
         if self._actions:
             self._client = ActionClient(node, self._actions[0], p["action"], callback_group=ReentrantCallbackGroup())
 
@@ -166,7 +169,10 @@ class DockHandler:
         loc = props.get("dockLocation")
         dock_id = props.get("dockId")
         by_id = bool(dock_id)
-        if (by_id or self.dock_type) and self._server_ready(ctx):
+        wants_server = by_id or self.dock_type
+        if wants_server and self.mode == "docking_server" and self._client is None:
+            return ctx.aborted("GENERAL_FAILURE", "docking server unavailable")
+        if wants_server and self._server_ready(ctx):
             if ctx.cancelled.is_set():
                 return ctx.aborted("REJECTED", "canceled")
             goal = self._actions[0].Goal()
@@ -179,6 +185,8 @@ class DockHandler:
                 goal.dock_pose = nav_goal_pose(self.node.ccs, loc, None, self.node.map_frame)
                 goal.dock_type = self.dock_type
             return _run_goal(self._client, goal, ctx, self.server_timeout_s, "dock")
+        if ctx.cancelled.is_set():  # e.g. cancelled during the auto-mode server probe
+            return ctx.aborted("REJECTED", "canceled")
         if not loc:
             return ctx.aborted("GENERAL_FAILURE", "dock: properties.dockLocation is required")
         pose = nav_goal_pose(self.node.ccs, loc, None, self.node.map_frame)
@@ -205,4 +213,4 @@ class UndockHandler:
             return ctx.aborted("GENERAL_FAILURE", "undock: UndockRobot is not available on this ROS distro")
         goal = self._actions[1].Goal()
         goal.dock_type = self.dock_type
-        return _run_goal(self._client, goal, ctx, self.server_timeout_s, "undock")
+        return _run_goal(self._client, goal, ctx, self.server_timeout_s, "undock", "undocking server")
