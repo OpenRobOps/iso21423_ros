@@ -16,7 +16,7 @@ RUN if pip install --help | grep -q break-system-packages; then FLAG=--break-sys
 FROM base AS dev
 ARG ROS_DISTRO
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3-pytest ros-${ROS_DISTRO}-launch-testing ros-${ROS_DISTRO}-launch-testing-ament-cmake \
+      python3-pytest mosquitto ros-${ROS_DISTRO}-launch-testing ros-${ROS_DISTRO}-launch-testing-ament-cmake \
     && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /ws && chmod 777 /ws
 WORKDIR /ws

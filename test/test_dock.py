@@ -8,7 +8,6 @@ import rclpy
 from iso21423 import ActionContext
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 try:
@@ -18,6 +17,7 @@ except ImportError:  # Humble: skip the tests below, but still import cleanly
 
 pytestmark = pytest.mark.skipif(DockRobot is None, reason="nav2_msgs docking actions not available (Humble)")
 
+from conftest import Spinner
 from iso21423_ros.ccs import CcsFrame
 from iso21423_ros.handlers import dock as dock_mod
 from iso21423_ros.handlers.dock import DockHandler, UndockHandler
@@ -112,18 +112,13 @@ def env(ros):
     node.handlers = []
     node.nav = SimpleNamespace(navigate=lambda pose, ctx, **kw: node.navigated.append(pose) or ctx.succeeded())
     fake = FakeDock(srv_node, dock_name, undock_name)
-    ex = MultiThreadedExecutor(num_threads=8)
-    ex.add_node(node)
-    ex.add_node(srv_node)
-    spin = threading.Thread(target=ex.spin, daemon=True)
-    spin.start()
+    spinner = Spinner(node, srv_node, num_threads=8)
     yield node, fake, dock_name, undock_name
     fake.release.set()
     for h in node.handlers:
         if h._client is not None:
             h._client.destroy()
-    ex.shutdown()
-    spin.join(timeout=5)
+    spinner.stop()
     node.destroy_node()
     srv_node.destroy_node()
 

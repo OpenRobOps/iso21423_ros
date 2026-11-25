@@ -9,6 +9,8 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
+        ("share/" + package_name + "/launch", ["launch/connector.launch.py"]),
+        ("share/" + package_name + "/config", ["config/nav2_default.yaml", "config/example_vendor_hook.py"]),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -17,4 +19,5 @@ setup(
     description="ROS 2 to ISO 21423 connector",
     license="Apache-2.0",
     tests_require=["pytest"],
+    entry_points={"console_scripts": ["iso21423_connector = iso21423_ros.node:main"]},
 )

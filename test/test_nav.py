@@ -10,9 +10,9 @@ from iso21423 import ActionContext
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
+from conftest import Spinner
 from iso21423_ros.ccs import CcsFrame
 from iso21423_ros.handlers.move import MoveHandler
 from iso21423_ros.handlers.pause import PauseHandler, ResumeHandler
@@ -128,11 +128,7 @@ def env(ros):
     node.status_out = []
     node.status = StatusComposer(node.status_out.append, "MODE_AUTO")
     fake = FakeNav(srv_node, name)
-    ex = MultiThreadedExecutor(num_threads=8)
-    ex.add_node(node)
-    ex.add_node(srv_node)
-    spin = threading.Thread(target=ex.spin, daemon=True)
-    spin.start()
+    spinner = Spinner(node, srv_node, num_threads=8)
 
     def make(**kw):
         kw.setdefault("action_name", name)
@@ -144,8 +140,7 @@ def env(ros):
 
     yield node, fake, make
     fake.release.set()
-    ex.shutdown()
-    spin.join(timeout=5)
+    spinner.stop()
     node.destroy_node()
     srv_node.destroy_node()
 

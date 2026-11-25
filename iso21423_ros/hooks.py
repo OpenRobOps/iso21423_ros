@@ -1,5 +1,7 @@
-"""Load pluggable Source/Handler classes from "package.module:ClassName" specs."""
+"""Load pluggable Source/Handler classes from "package.module:ClassName" or "/path/file.py:ClassName"."""
 import importlib
+import importlib.util
+from pathlib import Path
 
 DEFAULT_SOURCES = {
     "odometry": "iso21423_ros.sources.odometry:OdometrySource",
@@ -21,7 +23,13 @@ def load_class(spec: str, key: str) -> type:
         module, _, name = spec.partition(":")
         if not module or not name:
             raise ValueError("expected 'package.module:ClassName'")
-        cls = getattr(importlib.import_module(module), name)
+        if module.endswith(".py"):  # a vendor file, e.g. mounted into the container
+            spec_ = importlib.util.spec_from_file_location(f"iso21423_ros_hook_{Path(module).stem}", module)
+            mod = importlib.util.module_from_spec(spec_)
+            spec_.loader.exec_module(mod)
+        else:
+            mod = importlib.import_module(module)
+        cls = getattr(mod, name)
         if not isinstance(cls, type):
             raise TypeError("not a class")
         return cls
