@@ -1,0 +1,26 @@
+# Connector config for the flatland sim test (test/sim/docker-compose.yml).
+iso21423_connector:
+  ros__parameters:
+    use_sim_time: true              # flatland publishes /clock; TF stamps are sim time
+    entity_uuid: "5f0c2a1e-9b7d-4c3a-8e21-0d4f6b7a9c11"
+    manufacturer_name: OpenRobOps
+    identity:
+      model: flatland-turtlebot
+      serial_number: sim-0001
+      height: 0.4
+      footprint: [0.2, 0.2, 0.2, -0.2, -0.2, -0.2, -0.2, 0.2]
+    broker:
+      url: "mqtt://localhost:18830"
+    ccs:
+      id: "7d3e9f20-4b1a-4c6e-9a5d-2e8f1b0c3a44"
+    sources:
+      odometry: {enabled: true}
+      batteryStatus: {enabled: true}
+      globalPlan: {enabled: true}
+      localTrajectory: {enabled: true}
+    handlers:
+      move: {enabled: true}
+      dock: {enabled: true, mode: auto}
+      undock: {enabled: true}
+      pauseImr: {enabled: true}
+      resumeImr: {enabled: true}

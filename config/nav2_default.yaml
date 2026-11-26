@@ -1,0 +1,47 @@
+# Default Nav2 profile. Copy this file, set the REQUIRED values and launch with
+#   ros2 launch iso21423_ros connector.launch.py params_file:=/path/to/robot.yaml
+# Every key is listed with its default. A source/handler/extension is enabled by any key under it;
+# `enabled: false` disables it.
+iso21423_connector:
+  ros__parameters:
+    entity_uuid: ""                 # REQUIRED: this robot's UUID
+    manufacturer_name: ""
+    identity:
+      model: ""
+      serial_number: ""
+      height: 0.0                   # m
+      footprint: [0.3, 0.2, 0.3, -0.2, -0.3, -0.2, -0.3, 0.2]   # flat x1, y1, x2, y2, ... (m, base frame)
+      footprint_from_nav2: false    # true: read /global_costmap/global_costmap footprint, fall back to the above
+    broker:
+      url: "mqtt://localhost:1883"  # mqtts:// enables TLS
+      username: ""
+      password_file: ""             # file holding the password
+      tls: false
+    credentials_provider: ""        # "" = broker.* above; "openrobops" = fetch from oro.url
+    oro:
+      url: ""
+      api_key_file: ""
+    ccs:
+      id: ""                        # REQUIRED: the fleet's CCS UUID
+      map_frame: map
+      # reference_points: [map_x, map_y, ccs_x, ccs_y, ...]  # >= 3 points; omitted = identity
+    base_frame: base_link
+    mode: MODE_AUTO
+    execution_policy: preempt       # abort_new | queue_after | queue_replace | parallel | priority | preempt
+
+    sources:
+      odometry: {enabled: true, rate_hz: 2.0, twist_topic: /odom, lost_after_s: 2.0}
+      batteryStatus: {enabled: true, topic: /battery_state, low_threshold: 0.2}
+      globalPlan: {enabled: true, topic: /plan}
+      localTrajectory: {enabled: true, topic: /local_plan, rate_hz: 2.0}
+
+    handlers:
+      move: {enabled: true, action: /navigate_to_pose, server_timeout_s: 5.0, progress_min_interval_s: 2.0}
+      dock: {enabled: true, mode: auto, action: /dock_robot, dock_type: "", server_timeout_s: 2.0}
+      undock: {enabled: true, action: /undock_robot, dock_type: "", server_timeout_s: 2.0}  # dropped on Humble
+      pauseImr: {enabled: true}
+      resumeImr: {enabled: true}
+      # customCommand: {class: "iso21423_ros.oro:CustomCommandHandler", topic: /inorbit/custom_command}
+
+    # extensions:
+    #   customData: {enabled: true, topic: /inorbit/custom_data, batch_ms: 500}

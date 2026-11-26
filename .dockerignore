@@ -1,0 +1,6 @@
+.git
+.superpowers
+build
+install
+log
+test/sim/.venv/
