@@ -61,7 +61,7 @@ parameters can't nest lists.
 | `broker.tls` | `false` | TLS with the system CAs (also implied by `mqtts://`). |
 | `credentials_provider` | `""` | `""` uses `broker.*`. `openrobops` fetches them; see [OpenRobOps extras](#openrobops-extras-opt-in). |
 | `oro.url` | `""` | OpenRobOps base URL (`openrobops` provider). |
-| `oro.api_key_file` | `""` | A file holding the OpenRobOps API key. |
+| `oro.api_key_file` | `""` | A file holding the OpenRobOps API key. When empty, the `ORO_API_KEY` environment variable is used. |
 | `ccs.id` | `""` | The CCS UUID used in every published location. |
 | `ccs.map_frame` | `map` | The ROS frame the CCS is fitted to. |
 | `ccs.reference_points` | `[]` | Flat `[map_x, map_y, ccs_x, ccs_y, ...]`. With fewer than 3 points, map coordinates are CCS coordinates. |

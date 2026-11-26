@@ -87,7 +87,7 @@ def test_static_tls_false_is_none():
 def _oro_server(responses):
     class H(BaseHTTPRequestHandler):
         def do_POST(self):
-            self.rfile.read(int(self.headers["Content-Length"]))
+            srv.seen_keys.append(json.loads(self.rfile.read(int(self.headers["Content-Length"])))["apiKey"])
             code, body = responses.pop(0)
             self.send_response(code)
             self.end_headers()
@@ -97,6 +97,7 @@ def _oro_server(responses):
             pass
 
     srv = HTTPServer(("127.0.0.1", 0), H)
+    srv.seen_keys = []
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -133,3 +134,17 @@ def test_oro_stop_interrupts_retry(tmp_path):
     finally:
         srv.shutdown()
     assert time.monotonic() - t0 < 3
+
+
+def test_oro_api_key_from_env_when_no_file(monkeypatch):
+    monkeypatch.setenv("ORO_API_KEY", "env-key")
+    good = json.dumps({"hostname": "h", "port": 1, "protocol": "mqtt://", "username": "u",
+                       "password": "pw"}).encode()
+    srv = _oro_server([(200, good)])
+    cfg = from_params({"entity_uuid": UUID, "credentials_provider": "openrobops",
+                       "oro.url": f"http://127.0.0.1:{srv.server_port}"})
+    try:
+        c = credentials.resolve(cfg)
+    finally:
+        srv.shutdown()
+    assert c.url == "mqtt://h:1" and srv.seen_keys == ["env-key"]

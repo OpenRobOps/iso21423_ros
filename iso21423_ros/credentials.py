@@ -2,6 +2,7 @@
 import http.client
 import json
 import logging
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -32,7 +33,7 @@ def _read(path):
 
 def _fetch_oro(cfg, stop, sleep):
     endpoint = f"{cfg.oro.url.rstrip('/')}/iso_mqtt_config"
-    body = json.dumps({"apiKey": _read(cfg.oro.api_key_file), "entityUuid": cfg.entity_uuid}).encode()
+    body = json.dumps({"apiKey": _read(cfg.oro.api_key_file) if cfg.oro.api_key_file else os.environ["ORO_API_KEY"], "entityUuid": cfg.entity_uuid}).encode()
     while True:
         if stop.is_set():
             raise Iso21423Error("credential fetch stopped")
