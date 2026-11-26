@@ -21,6 +21,8 @@ from conftest import Spinner
 from iso21423_ros.ccs import CcsFrame
 from iso21423_ros.handlers import dock as dock_mod
 from iso21423_ros.handlers.dock import DockHandler, UndockHandler
+from iso21423_ros.nav import NavRunner
+from iso21423_ros.node import ConnectorNode
 from iso21423_ros.status import StatusComposer
 
 _names = itertools.count()
@@ -110,7 +112,8 @@ def env(ros):
     node.status = StatusComposer(node.status_out.append, "MODE_AUTO")
     node.navigated = []
     node.handlers = []
-    node.nav = SimpleNamespace(navigate=lambda pose, ctx, **kw: node.navigated.append(pose) or ctx.succeeded())
+    node.nav = SimpleNamespace(paused=False,
+                               navigate=lambda pose, ctx, **kw: node.navigated.append(pose) or ctx.succeeded())
     fake = FakeDock(srv_node, dock_name, undock_name)
     spinner = Spinner(node, srv_node, num_threads=8)
     yield node, fake, dock_name, undock_name
@@ -275,3 +278,44 @@ def test_exception_clears_docking(env):
     with pytest.raises(ZeroDivisionError):
         h.execute(dock_action(), Ctx().ctx)
     assert h.states() == []
+
+
+def test_dock_shows_docking_never_idle(env):
+    """Through the node's request tracking, with the nav contributor too: IDLE needs no request running."""
+    node, fake, dn, _ = env
+    fake.mode = "hang"
+    node._inflight, node._idle = 0, threading.Condition()
+    node.nav = NavRunner(node, "/unused_nav")
+    h = _h(node, DockHandler(node, {"action": dn}))
+    node.status.add_contributor(h.states)
+    node.status.add_contributor(node.nav.states)
+    node.status.refresh()
+    assert node.status_out[-1] == ["MODE_AUTO", "IDLE"]
+    start = len(node.status_out)
+    t, box = run_bg(ConnectorNode._tracked(node, h.execute), dock_action(dockId="d"), Ctx().ctx)
+    wait_for(lambda: fake.goals)
+    assert node.status_out[-1] == ["MODE_AUTO", "DOCKING"]
+    fake.release.set()
+    t.join(5)
+    assert box["r"].outcome == "aborted"  # hang + release = server abort
+    assert not any("IDLE" in s for s in node.status_out[start:-1])
+    assert node.status_out[-1] == ["MODE_AUTO", "IDLE"]
+
+
+@pytest.mark.parametrize("cls", [DockHandler, UndockHandler])
+def test_pause_cancels_dock_goal_and_resume_resends(env, cls):
+    node, fake, dn, un = env
+    fake.mode = "hang"
+    h = _h(node, cls(node, {"action": dn if cls is DockHandler else un}))
+    c = Ctx()
+    t, box = run_bg(h.execute, dock_action(dockId="d"), c.ctx)
+    wait_for(lambda: fake.goals)
+    node.nav.paused = True
+    wait_for(lambda: len(fake.cancels) == 1)
+    time.sleep(0.3)
+    assert len(fake.goals) == 1 and t.is_alive()  # held while paused, no new goal
+    fake.mode = "succeed"
+    node.nav.paused = False
+    t.join(5)
+    assert not t.is_alive() and box["r"].outcome == "succeeded"
+    assert len(fake.goals) == 2 and len(fake.cancels) == 1

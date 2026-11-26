@@ -21,6 +21,17 @@ _POLL_S = 0.05  # ctx.cancelled has no callback hook, so waits poll it at this p
 SHUTTING_DOWN = "connector shutting down"
 
 
+def runner_kwargs(move):
+    """NavRunner kwargs from the handlers.move params. ValueError on a bad value."""
+    kw = {"action_name": move.get("action", "/navigate_to_pose")}
+    for key, default in (("server_timeout_s", 5.0), ("progress_min_interval_s", 2.0)):
+        v = move.get(key, default)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+            raise ValueError(f"handlers.move.{key}: expected a number > 0, got {v!r}")
+        kw[key] = float(v)
+    return kw
+
+
 class NavRunner:
     def __init__(self, node, action_name="/navigate_to_pose", server_timeout_s=5.0, progress_min_interval_s=2.0):
         self.node = node
@@ -43,10 +54,11 @@ class NavRunner:
         return self._busy > 0
 
     def states(self):
-        """Lock-free: the composer calls this under its own lock."""
+        """Lock-free: the composer calls this under its own lock. IDLE: no Nav2 goal and no request
+        of any kind running (the node's _inflight)."""
         if self._paused:
             return ["PAUSED"]
-        return [] if self._busy else ["IDLE"]
+        return [] if self._busy or getattr(self.node, "_inflight", 0) else ["IDLE"]
 
     def pause(self):
         self._set_paused(True)

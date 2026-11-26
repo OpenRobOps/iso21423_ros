@@ -283,3 +283,24 @@ def test_footprint_from_nav2(broker):
         fleet.stop()
         spinner.stop()
         costmap.destroy_node()
+
+
+def test_move_runner_params_reach_the_runner(broker):
+    uid = str(uuid.uuid4())
+    fleet = Fleet(broker, f"{ROOT}/{uid}/status")
+    params = base_params(broker, uid, **{"handlers.move.server_timeout_s": 1.5,
+                                         "handlers.move.progress_min_interval_s": 0.25})
+    try:
+        with connector(params) as node:
+            fleet.wait(lambda: any(fleet.on("/status")), "status")
+            assert (node.nav.server_timeout_s, node.nav.progress_min_interval_s) == (1.5, 0.25)
+    finally:
+        fleet.stop()
+
+
+@pytest.mark.parametrize("key,value", [("server_timeout_s", 0.0), ("progress_min_interval_s", -1.0),
+                                       ("server_timeout_s", "5"), ("progress_min_interval_s", True)])
+def test_bad_move_runner_param_fails_fast(key, value):
+    with pytest.raises(ValueError, match=rf"^handlers.move.{key}: expected a number > 0"):
+        ConnectorNode(parameter_overrides=[Parameter("entity_uuid", value=str(uuid.uuid4())),
+                                           Parameter(f"handlers.move.{key}", value=value)])

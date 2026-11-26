@@ -12,6 +12,7 @@ COPY --from=iso21423 py-sdk /opt/iso21423/py-sdk
 RUN if pip install --help | grep -q break-system-packages; then FLAG=--break-system-packages; \
     else pip install -U pip; fi; \
     pip install $FLAG /opt/iso21423/py-sdk
+RUN python3 -c "import iso21423, iso21423.constants"
 
 FROM base AS dev
 ARG ROS_DISTRO

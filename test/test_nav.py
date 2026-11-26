@@ -332,3 +332,25 @@ def test_raising_progress_does_not_kill_move(env, logcap):
     c.ctx._update = lambda *a, **k: (_ for _ in ()).throw(OSError("broker down"))
     assert nav.navigate(pose(1, 0), c.ctx).outcome == "succeeded"
     assert "broker down" in logcap.text
+
+
+def test_vendor_request_never_shows_idle(env):
+    """A request that is not a nav goal (vendor handler) still means not IDLE."""
+    from iso21423_ros.node import ConnectorNode
+    node, _, make = env
+    make()
+    node._inflight, node._idle = 0, threading.Condition()
+    node.status.refresh()
+    assert node.status_out[-1] == ["MODE_AUTO", "IDLE"]
+    entered, release = threading.Event(), threading.Event()
+
+    def beep(action, ctx):
+        entered.set()
+        release.wait(5)
+        return ctx.succeeded()
+    t, box = run_bg(ConnectorNode._tracked(node, beep), {"properties": {}}, Ctx().ctx)
+    assert entered.wait(5)
+    assert node.status_out[-1] == ["MODE_AUTO"]
+    release.set()
+    t.join(5)
+    assert box["r"].outcome == "succeeded" and node.status_out[-1] == ["MODE_AUTO", "IDLE"]

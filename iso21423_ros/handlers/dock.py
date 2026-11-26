@@ -30,9 +30,10 @@ def _import_actions():
     return DockRobot, UndockRobot
 
 
-def _run_goal(client, goal, ctx, timeout, label, server="docking server", closing=None):
+def _run_goal(client, goal, ctx, timeout, label, server="docking server", closing=None, paused=lambda: False):
     """Send goal, wait for its result, map it to an ActionResult. Cancels only its own handle.
-    `closing` (an Event) set means connector shutdown: cancel our goal and end ABORTED."""
+    `closing` (an Event) set means connector shutdown: cancel our goal and end ABORTED.
+    `paused()` true (pauseImr) means: cancel our goal, hold without one, re-send it on resume."""
     wake = threading.Event()
     closing = closing or threading.Event()
 
@@ -42,54 +43,73 @@ def _run_goal(client, goal, ctx, timeout, label, server="docking server", closin
     def shutting():
         return ctx.aborted("GENERAL_FAILURE", SHUTTING_DOWN)
 
-    def wait(fut, deadline):
-        while not fut.done() and time.monotonic() < deadline:
-            wake.wait(_POLL_S)
-            wake.clear()
-        return fut.done()
-
-    deadline = time.monotonic() + timeout
-    while not client.server_is_ready():
-        if ctx.cancelled.is_set():
-            return canceled()
-        if closing.is_set():
-            return shutting()
-        if time.monotonic() >= deadline:
-            return ctx.aborted("GENERAL_FAILURE", f"{server} unavailable")
-        ctx.cancelled.wait(_POLL_S)
-
-    send = client.send_goal_async(goal)
-    send.add_done_callback(lambda _: wake.set())
-    if not wait(send, time.monotonic() + timeout):
-        send.add_done_callback(_cancel_if_accepted)  # don't leak a goal accepted after we gave up
-        if ctx.cancelled.is_set():
-            return canceled()
-        return shutting() if closing.is_set() else ctx.aborted("GENERAL_FAILURE", f"{label} goal response timeout")
-    handle = send.result()  # OUR handle
-    if not handle.accepted:
-        return ctx.aborted("GENERAL_FAILURE", f"{label} goal rejected")
-    result = handle.get_result_async()
-    result.add_done_callback(lambda _: wake.set())
-
-    lost_since = None
-    while not result.done():
-        if ctx.cancelled.is_set():
-            _cancel_quietly(handle)
-            wait(result, time.monotonic() + timeout)  # bounded wait for the server to finish it
-            return canceled()
-        if closing.is_set():
-            _cancel_quietly(handle)
-            wait(result, time.monotonic() + timeout)
-            return shutting()
-        if client.server_is_ready():
-            lost_since = None
-        elif lost_since is None:
-            lost_since = time.monotonic()
-        elif time.monotonic() - lost_since > timeout:
-            _cancel_quietly(handle)
-            return ctx.aborted("GENERAL_FAILURE", f"{server} lost")
+    def sleep():
         wake.wait(_POLL_S)
         wake.clear()
+
+    def wait(fut, deadline):
+        while not fut.done() and time.monotonic() < deadline:
+            sleep()
+        return fut.done()
+
+    while True:
+        while paused() and not closing.is_set():  # hold, no goal sent; woken by the poll
+            if ctx.cancelled.is_set():
+                return canceled()
+            sleep()
+        deadline = time.monotonic() + timeout
+        while not client.server_is_ready():
+            if ctx.cancelled.is_set():
+                return canceled()
+            if closing.is_set():
+                return shutting()
+            if time.monotonic() >= deadline:
+                return ctx.aborted("GENERAL_FAILURE", f"{server} unavailable")
+            ctx.cancelled.wait(_POLL_S)
+        if ctx.cancelled.is_set():
+            return canceled()
+        if closing.is_set():
+            return shutting()
+
+        send = client.send_goal_async(goal)
+        send.add_done_callback(lambda _: wake.set())
+        if not wait(send, time.monotonic() + timeout):
+            send.add_done_callback(_cancel_if_accepted)  # don't leak a goal accepted after we gave up
+            if ctx.cancelled.is_set():
+                return canceled()
+            return shutting() if closing.is_set() else ctx.aborted("GENERAL_FAILURE", f"{label} goal response timeout")
+        handle = send.result()  # OUR handle
+        if not handle.accepted:
+            return ctx.aborted("GENERAL_FAILURE", f"{label} goal rejected")
+        result = handle.get_result_async()
+        result.add_done_callback(lambda _: wake.set())
+
+        lost_since = None
+        while not result.done():
+            if ctx.cancelled.is_set():
+                _cancel_quietly(handle)
+                wait(result, time.monotonic() + timeout)  # bounded wait for the server to finish it
+                return canceled()
+            if closing.is_set():
+                _cancel_quietly(handle)
+                wait(result, time.monotonic() + timeout)
+                return shutting()
+            if paused():
+                _cancel_quietly(handle)
+                wait(result, time.monotonic() + timeout)
+                if not result.done() or result.result().status == GoalStatus.STATUS_CANCELED:
+                    break  # back to the hold: re-send on resume
+                continue  # finished before our cancel landed: map that result below
+            if client.server_is_ready():
+                lost_since = None
+            elif lost_since is None:
+                lost_since = time.monotonic()
+            elif time.monotonic() - lost_since > timeout:
+                _cancel_quietly(handle)
+                return ctx.aborted("GENERAL_FAILURE", f"{server} lost")
+            sleep()
+        else:
+            break
     if ctx.cancelled.is_set():
         return canceled()
     res = result.result()
@@ -205,7 +225,8 @@ class DockHandler:
                 goal.use_dock_id = False
                 goal.dock_pose = nav_goal_pose(self.node.ccs, loc, None, self.node.map_frame)
                 goal.dock_type = self.dock_type
-            return _run_goal(self._client, goal, ctx, self.server_timeout_s, "dock", closing=self._closing)
+            return _run_goal(self._client, goal, ctx, self.server_timeout_s, "dock", closing=self._closing,
+                             paused=lambda: self.node.nav.paused)
         if ctx.cancelled.is_set():  # e.g. cancelled during the auto-mode server probe
             return ctx.aborted("REJECTED", "canceled")
         if self._closing.is_set():
@@ -244,4 +265,4 @@ class UndockHandler:
         goal = self._actions[1].Goal()
         goal.dock_type = self.dock_type
         return _run_goal(self._client, goal, ctx, self.server_timeout_s, "undock", "undocking server",
-                         closing=self._closing)
+                         closing=self._closing, paused=lambda: self.node.nav.paused)

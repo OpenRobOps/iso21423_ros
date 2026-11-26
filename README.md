@@ -86,10 +86,10 @@ class; it is required for names without a default. Every other key is passed to 
 | `sources.batteryStatus` | `topic` (`/battery_state`), `low_threshold` (0.2) | `sensor_msgs/BatteryState`. Adds `CHARGING`, `LOW_BATTERY`. |
 | `sources.globalPlan` | `topic` (`/plan`) | `nav_msgs/Path`, republished when it changes. |
 | `sources.localTrajectory` | `topic` (`/local_plan`), `rate_hz` (2.0) | `nav_msgs/Path`, throttled. |
-| `handlers.move` | `action` (`/navigate_to_pose`) | Nav2 `NavigateToPose`; honours `toleranceRadius`. |
+| `handlers.move` | `action` (`/navigate_to_pose`), `server_timeout_s` (5.0), `progress_min_interval_s` (2.0) | Nav2 `NavigateToPose`; honours `toleranceRadius`. `server_timeout_s` bounds the waits for the server, a goal response and a cancel; `progress_min_interval_s` throttles `distanceRemaining` progress. Both must be > 0. |
 | `handlers.dock` | `mode` (`auto`: `docking_server` or `navigate`), `action` (`/dock_robot`), `dock_type` (`""`), `server_timeout_s` (2.0) | `DockRobot` by `dockId`, or by pose when `dock_type` is set; otherwise navigates to `dockLocation`. Adds `DOCKING`. |
 | `handlers.undock` | `action` (`/undock_robot`), `dock_type` (`""`), `server_timeout_s` (2.0) | `UndockRobot`. Not accepted on Humble. |
-| `handlers.pauseImr`, `handlers.resumeImr` | none | Pause cancels the Nav2 goal and keeps the objective; resume resends it. Adds `PAUSED`. |
+| `handlers.pauseImr`, `handlers.resumeImr` | none | Pause cancels the running Nav2 goal (`move`, `dock`, `undock`, docking-server goals included) and keeps the objective; resume resends it. Adds `PAUSED`. |
 | `handlers.customCommand` | `topic` (`/inorbit/custom_command`) | Opt-in, needs `class: iso21423_ros.oro:CustomCommandHandler`. |
 | `extensions.customData` | `topic` (`/inorbit/custom_data`), `batch_ms` (500) | Opt-in. |
 
@@ -156,8 +156,8 @@ All of these are off by default, so the connector behaves the same on any broker
 - **Startup:** the broker connection (and the OpenRobOps credential fetch) retries every 10 s, so the
   node can start before the broker is up.
 - **Shutdown** (SIGINT/SIGTERM): the node runs these steps in order:
-  1. Each running `move`/`dock`/`undock` cancels its own Nav2 goal and ends ABORTED ("connector
-     shutting down"). In-flight requests get up to 3 s to end.
+  1. New requests are no longer taken. Each running `move`/`dock`/`undock` cancels its own Nav2 goal
+     and ends ABORTED ("connector shutting down"). In-flight requests get up to 6 s to end.
   2. Sources are flushed.
   3. The node publishes the `OFFLINE` status, clears its retained topics and disconnects.
 - **Preempt** (the default policy): a new request cancels the running one and starts at once. The

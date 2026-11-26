@@ -20,14 +20,14 @@ from rclpy.signals import SignalHandlerOptions
 from iso21423_ros import config, credentials
 from iso21423_ros.ccs import CcsFrame
 from iso21423_ros.hooks import DEFAULT_HANDLERS, DEFAULT_SOURCES, load_class
-from iso21423_ros.nav import NavRunner
+from iso21423_ros.nav import NavRunner, runner_kwargs
 from iso21423_ros.status import StatusComposer
 
 log = logging.getLogger(__name__)
 
 DEFAULT_EXTENSIONS = {"customData": "iso21423_ros.oro:CustomDataSource"}
 RETRY_S = 10
-IDLE_WAIT_S = 3.0  # shutdown: how long in-flight requests get to end after their goals are cancelled
+IDLE_WAIT_S = 6.0  # shutdown: how long in-flight requests get to end after their goals are cancelled
 NAV2_FOOTPRINT_SERVICE = "/global_costmap/global_costmap/get_parameters"
 
 
@@ -54,6 +54,14 @@ def _guarded(steps):
             log.exception("shutdown: %s failed", what)
 
 
+def _refresh(status):
+    """Called outside every lock (lock order: the composer's lock is taken last)."""
+    try:
+        status.refresh()
+    except Exception:
+        log.exception("status refresh failed")
+
+
 def _version():
     try:
         return importlib.metadata.version("iso21423_ros")
@@ -74,6 +82,7 @@ class ConnectorNode(Node):
         flat = {k: list(p.value) if isinstance(p.value, array.array) else p.value
                 for k, p in self.get_parameters_by_prefix("").items()}
         self.config = cfg = config.from_params(flat)
+        self._nav_kw = runner_kwargs(cfg.handlers.get("move", {}))
         self._sources = _enabled("sources", cfg.sources, DEFAULT_SOURCES)
         self._extensions = _enabled("extensions", cfg.extensions, DEFAULT_EXTENSIONS)
         self._handlers = {}
@@ -153,8 +162,7 @@ class ConnectorNode(Node):
     def _build(self, entity):
         cfg = self.config
         self.status = StatusComposer(self._publish_status, cfg.mode)
-        move = cfg.handlers.get("move", {})
-        self.nav = NavRunner(self, move.get("action", "/navigate_to_pose"))
+        self.nav = NavRunner(self, **self._nav_kw)
         for cls, params in [*self._sources.values(), *self._extensions.values()]:
             self.hooks.append(cls(self, entity, params))
         for name, (cls, params) in self._handlers.items():
@@ -174,12 +182,14 @@ class ConnectorNode(Node):
         def run(action, ctx):
             with self._idle:
                 self._inflight += 1
+            _refresh(self.status)  # IDLE needs _inflight == 0
             try:
                 return execute(action, ctx)
             finally:
                 with self._idle:
                     self._inflight -= 1
                     self._idle.notify_all()
+                _refresh(self.status)
         return run
 
     def _publish_status(self, states):
@@ -229,14 +239,23 @@ class ConnectorNode(Node):
             self._closed = True
         if not self._built.wait(15):  # start_serving() can wait up to 10 s for its SUBACK
             log.warning("shutdown: startup build still running")
-        closers = [self.nav, *self.handlers.values()]
-        steps = [(f"close {type(h).__name__}", h.close) for h in closers if callable(getattr(h, "close", None))]
+        steps = []
+        try:
+            closers = [self.nav, *self.handlers.values()]
+            steps = [(f"close {type(h).__name__}", h.close) for h in closers if callable(getattr(h, "close", None))]
+        except Exception:
+            log.exception("shutdown: collecting handlers to close failed")
+        if self.entity:  # no new requests from here on
+            steps.append(("stop serving", self.entity.stop_serving))
         t0 = time.monotonic()
         steps.append(("wait for in-flight requests", self._wait_idle))
         if self.entity:  # the library publishes terminal statuses on its own threads, after handlers return
             steps.append(("wait for library terminal statuses", lambda: self._wait_library_idle(t0)))
         steps.append(("destroy subscriptions/timers", self._destroy_entities))
-        steps += [(f"close {type(h).__name__}", h.close) for h in self.hooks if callable(getattr(h, "close", None))]
+        try:
+            steps += [(f"close {type(h).__name__}", h.close) for h in self.hooks if callable(getattr(h, "close", None))]
+        except Exception:
+            log.exception("shutdown: collecting sources to close failed")
         if self.status:
             steps.append(("close status", self.status.close))
         if self.entity:

@@ -36,7 +36,7 @@ iso21423_connector:
       localTrajectory: {enabled: true, topic: /local_plan, rate_hz: 2.0}
 
     handlers:
-      move: {enabled: true, action: /navigate_to_pose}
+      move: {enabled: true, action: /navigate_to_pose, server_timeout_s: 5.0, progress_min_interval_s: 2.0}
       dock: {enabled: true, mode: auto, action: /dock_robot, dock_type: "", server_timeout_s: 2.0}
       undock: {enabled: true, action: /undock_robot, dock_type: "", server_timeout_s: 2.0}  # dropped on Humble
       pauseImr: {enabled: true}
