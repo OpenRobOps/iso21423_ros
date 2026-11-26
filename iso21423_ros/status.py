@@ -25,6 +25,7 @@ class StatusComposer:
         self._contributors = []
         self._last = None  # tuple, swapped atomically after a successful publish
         self._warned = set()
+        self._closed = False
         # ponytail: compute+publish under one RLock keeps published order exact (a publish
         # outside the lock could reorder); a slow broker publish blocks other refreshers.
         self._lock = threading.RLock()
@@ -40,11 +41,18 @@ class StatusComposer:
             self._mode = mode
         self.refresh()
 
+    def close(self):
+        """No publish happens after this returns (shutdown: the OFFLINE tombstone must stay last)."""
+        with self._lock:
+            self._closed = True
+
     def states(self) -> list:
         return list(self._last or ())
 
     def refresh(self):
         with self._lock:
+            if self._closed:
+                return
             seen = []
             for fn in self._contributors:
                 try:

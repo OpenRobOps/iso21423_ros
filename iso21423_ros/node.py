@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_EXTENSIONS = {"customData": "iso21423_ros.oro:CustomDataSource"}
 RETRY_S = 10
+IDLE_WAIT_S = 3.0  # shutdown: how long in-flight requests get to end after their goals are cancelled
 NAV2_FOOTPRINT_SERVICE = "/global_costmap/global_costmap/get_parameters"
 
 
@@ -75,18 +76,29 @@ class ConnectorNode(Node):
         self.config = cfg = config.from_params(flat)
         self._sources = _enabled("sources", cfg.sources, DEFAULT_SOURCES)
         self._extensions = _enabled("extensions", cfg.extensions, DEFAULT_EXTENSIONS)
-        self._handlers = {n: h for n, h in _enabled("handlers", cfg.handlers, DEFAULT_HANDLERS).items()
-                          if getattr(h[0], "available", lambda: True)()}  # e.g. undock on Humble
+        self._handlers = {}
+        for name, h in _enabled("handlers", cfg.handlers, DEFAULT_HANDLERS).items():
+            if getattr(h[0], "available", lambda: True)():
+                self._handlers[name] = h
+            else:  # e.g. undock on Humble
+                log.warning("handlers.%s: not available on this ROS distro; not accepted", name)
+        if not cfg.ccs.id:
+            log.warning("ccs.id is empty: locations will carry an empty CCS id")
         self.ccs = CcsFrame(cfg.ccs.id, cfg.ccs.reference_points)
         self.map_frame, self.base_frame = cfg.ccs.map_frame, cfg.base_frame
         self.tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.status = self.nav = self.entity = None
         self.client = None
-        self.hooks = []
+        self.hooks = []  # sources and extensions
+        self.handlers = {}
         self._stop = threading.Event()
-        self._lock = threading.Lock()  # serialises the post-connect build against shutdown()
+        self._lock = threading.Lock()  # guards _closed and the client/entity hand-over only
         self._closed = False
+        self._built = threading.Event()  # set once the post-connect build is over (or never started)
+        self._built.set()
+        self._inflight = 0  # handler executes running (all handlers, vendor ones too)
+        self._idle = threading.Condition()
 
     # ---- startup -------------------------------------------------------------------------------
     def start(self):
@@ -110,6 +122,7 @@ class ConnectorNode(Node):
         while True:
             if self._stop.is_set():
                 return
+            client = None
             try:
                 client = Client.connect(creds.url, username=creds.username or None,
                                         password=creds.password or None, tls=creds.tls)
@@ -120,14 +133,22 @@ class ConnectorNode(Node):
                 break
             except Exception as e:  # broker down, refused, DNS...: retry, never crash
                 log.warning("broker %s: %s; retrying in %ss", creds.url, e, RETRY_S)
+                if client is not None:
+                    _guarded([("client close", client.close)])
                 self._stop.wait(RETRY_S)
         with self._lock:
-            if self._closed:  # shutdown() ran while we were connecting: it never saw this client
-                _guarded([("unregister", entity.unregister), ("client close", client.close)])
-                return
-            self.client, self.entity = client, entity
-            log.info("registered %s on %s: provides %s, accepts %s", cfg.entity_uuid, creds.url, provides, accepts)
+            closed = self._closed
+            if not closed:
+                self.client, self.entity = client, entity
+                self._built.clear()  # shutdown() waits for the build before tearing down
+        if closed:  # shutdown() ran while we were connecting: it never saw this client
+            _guarded([("unregister", entity.unregister), ("client close", client.close)])
+            return
+        log.info("registered %s on %s: provides %s, accepts %s", cfg.entity_uuid, creds.url, provides, accepts)
+        try:
             self._build(entity)
+        finally:
+            self._built.set()
 
     def _build(self, entity):
         cfg = self.config
@@ -136,26 +157,39 @@ class ConnectorNode(Node):
         self.nav = NavRunner(self, move.get("action", "/navigate_to_pose"))
         for cls, params in [*self._sources.values(), *self._extensions.values()]:
             self.hooks.append(cls(self, entity, params))
-        handlers = {}
         for name, (cls, params) in self._handlers.items():
-            handlers[name] = h = cls(self, params)
-            self.hooks.append(h)
-        for h in self.hooks:
+            self.handlers[name] = cls(self, params)
+        for h in [*self.hooks, *self.handlers.values()]:
             if callable(getattr(h, "states", None)):
                 self.status.add_contributor(h.states)
         self.status.add_contributor(self.nav.states)
-        for name, h in handlers.items():
-            entity.on_request(name, h.execute)
+        for name, h in self.handlers.items():
+            entity.on_request(name, self._tracked(h.execute))
+        if self._stop.is_set():  # shutdown() started meanwhile: don't take requests
+            return
         entity.start_serving()
         self.status.refresh()
 
+    def _tracked(self, execute):
+        def run(action, ctx):
+            with self._idle:
+                self._inflight += 1
+            try:
+                return execute(action, ctx)
+            finally:
+                with self._idle:
+                    self._inflight -= 1
+                    self._idle.notify_all()
+        return run
+
     def _publish_status(self, states):
-        if not self._closed:  # after unregister the OFFLINE tombstone must stay last
-            self.entity.publish_status(states)
+        self.entity.publish_status(states)
 
     def _details(self):
         ident = self.config.identity
         fp = (self._nav2_footprint() if ident.footprint_from_nav2 else None) or ident.footprint
+        if not fp:
+            log.warning("identity.footprint is empty: imrFootprint and imrWorkingArea will be empty")
         fp = [{"x": float(x), "y": float(y)} for x, y in fp]
         return {"imrModel": ident.model, "imrSerialNumber": ident.serial_number, "imrFootprint": fp,
                 "imrWorkingArea": fp, "imrHeight": float(ident.height),
@@ -185,19 +219,33 @@ class ConnectorNode(Node):
 
     # ---- shutdown ------------------------------------------------------------------------------
     def shutdown(self):
-        """Idempotent: stop startup, flush sources, unregister (OFFLINE tombstone), close the client."""
+        """Idempotent. Run it while the executor still spins (goal cancels must go out):
+        end in-flight requests (each cancels its own goal), flush sources, unregister (OFFLINE
+        tombstone), close the client. A connect still in progress cleans up after itself."""
         self._stop.set()
-        with self._lock:  # waits for a build in progress; a connect in progress cleans up after itself
+        with self._lock:
             if self._closed:
                 return
             self._closed = True
-        steps = [("destroy subscriptions/timers", self._destroy_entities)]
+        if not self._built.wait(15):  # start_serving() can wait up to 10 s for its SUBACK
+            log.warning("shutdown: startup build still running")
+        closers = [self.nav, *self.handlers.values()]
+        steps = [(f"close {type(h).__name__}", h.close) for h in closers if callable(getattr(h, "close", None))]
+        steps.append(("wait for in-flight requests", self._wait_idle))
+        steps.append(("destroy subscriptions/timers", self._destroy_entities))
         steps += [(f"close {type(h).__name__}", h.close) for h in self.hooks if callable(getattr(h, "close", None))]
+        if self.status:
+            steps.append(("close status", self.status.close))
         if self.entity:
             steps.append(("unregister", self.entity.unregister))
         if self.client:
             steps.append(("client close", self.client.close))
         _guarded(steps)
+
+    def _wait_idle(self):
+        with self._idle:
+            if not self._idle.wait_for(lambda: self._inflight == 0, IDLE_WAIT_S):
+                log.warning("shutdown: %d request(s) still running after %.0fs", self._inflight, IDLE_WAIT_S)
 
     def _destroy_entities(self):
         for s in list(self.subscriptions):
@@ -229,17 +277,32 @@ def main(args=None):
         try:
             node.start()
         except Exception:
+            if node._stop.is_set():  # a side effect of shutting down, not a startup failure
+                log.debug("startup ended by shutdown", exc_info=True)
+                return
             log.exception("startup failed")
             failed.append(True)
             done.set()
 
     ex = MultiThreadedExecutor()
     ex.add_node(node)
+    spinning = threading.Event()
+    spinning.set()
+
+    def spin():
+        while spinning.is_set():
+            ex.spin_once(timeout_sec=0.1)
+
+    spinner = threading.Thread(target=spin, daemon=True)
+    spinner.start()
     threading.Thread(target=startup, daemon=True).start()
     try:
-        while not done.is_set() and rclpy.ok():
-            ex.spin_once(timeout_sec=0.1)
+        while not done.wait(0.2) and rclpy.ok():
+            pass
+        node.shutdown()  # while the executor still spins: Nav2 goal cancels must go out
     finally:
+        spinning.clear()
+        spinner.join()
         node.destroy_node()
         ex.shutdown()
         rclpy.try_shutdown()

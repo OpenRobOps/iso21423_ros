@@ -25,8 +25,9 @@ Supported: ROS 2 **Jazzy** (primary) and **Humble** (see [Humble notes](#humble-
    ```
 
 The robot appears on the broker under `/ISO_21423/v1/IMR/<entity_uuid>/...` with `identity`,
-`status`, `odometry`, `batteryStatus`, `globalPlan` and `localTrajectory`. It accepts `move`, `dock`,
-`undock`, `pauseImr`, `resumeImr` and `cancelRequest`.
+`status`, `odometry`, `batteryStatus`, `globalPlan` and `localTrajectory`. Its identity advertises
+`move`, `dock`, `undock`, `pauseImr` and `resumeImr`. `cancelRequest` also works, but it is not in
+the advertised list.
 
 ## Docker image
 
@@ -92,7 +93,8 @@ class; it is required for names without a default. Every other key is passed to 
 | `handlers.customCommand` | `topic` (`/inorbit/custom_command`) | Opt-in, needs `class: iso21423_ros.oro:CustomCommandHandler`. |
 | `extensions.customData` | `topic` (`/inorbit/custom_data`), `batch_ms` (500) | Opt-in. |
 
-`cancelRequest` is handled by the library: it sets `ctx.cancelled` on the running handler.
+`cancelRequest` is handled by the library and is not listed in `accepts`. It sets `ctx.cancelled` on
+the running handler.
 
 ## Hooks: your own sources and handlers
 
@@ -114,7 +116,12 @@ class Handler:                                # serves one action type
 - `publisher` is the library's `EntityHandle`: `publish_odometry`, `publish_battery_status`,
   `publish_extension`, and so on.
 - In `execute`, watch `ctx.cancelled` (a `threading.Event`) and report progress with
-  `ctx.progress({...})`.
+  `ctx.progress({...})`. Each request runs on its own thread.
+- Source subscription and timer callbacks run serialised, one at a time, in the node's default
+  callback group. A source doesn't need locks between its own callbacks. A callback that blocks
+  delays every other source.
+- A handler may define `close()`. The node calls it at shutdown, before it waits for in-flight
+  requests to end. Stop your work there, for example by cancelling your own goals.
 - A class that fails to load stops the node at startup with an error naming the config key.
 
 [`config/example_vendor_hook.py`](config/example_vendor_hook.py) is a complete custom action `beep`
@@ -148,8 +155,11 @@ All of these are off by default, so the connector behaves the same on any broker
 
 - **Startup:** the broker connection (and the OpenRobOps credential fetch) retries every 10 s, so the
   node can start before the broker is up.
-- **Shutdown** (SIGINT/SIGTERM): the node publishes the `OFFLINE` status, clears its retained topics
-  and disconnects.
+- **Shutdown** (SIGINT/SIGTERM): the node runs these steps in order:
+  1. Each running `move`/`dock`/`undock` cancels its own Nav2 goal and ends ABORTED ("connector
+     shutting down"). In-flight requests get up to 3 s to end.
+  2. Sources are flushed.
+  3. The node publishes the `OFFLINE` status, clears its retained topics and disconnects.
 - **Preempt** (the default policy): a new request cancels the running one and starts at once. The
   library doesn't wait for the old handler to return, so a handler must cancel only its own Nav2
   goal, never "the current goal".

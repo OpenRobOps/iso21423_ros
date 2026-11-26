@@ -14,6 +14,7 @@ from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 from iso21423_ros.mappings import nav_goal_pose
+from iso21423_ros.nav import SHUTTING_DOWN
 
 log = logging.getLogger(__name__)
 
@@ -29,12 +30,17 @@ def _import_actions():
     return DockRobot, UndockRobot
 
 
-def _run_goal(client, goal, ctx, timeout, label, server="docking server"):
-    """Send goal, wait for its result, map it to an ActionResult. Cancels only its own handle."""
+def _run_goal(client, goal, ctx, timeout, label, server="docking server", closing=None):
+    """Send goal, wait for its result, map it to an ActionResult. Cancels only its own handle.
+    `closing` (an Event) set means connector shutdown: cancel our goal and end ABORTED."""
     wake = threading.Event()
+    closing = closing or threading.Event()
 
     def canceled():
         return ctx.aborted("REJECTED", "canceled")
+
+    def shutting():
+        return ctx.aborted("GENERAL_FAILURE", SHUTTING_DOWN)
 
     def wait(fut, deadline):
         while not fut.done() and time.monotonic() < deadline:
@@ -46,6 +52,8 @@ def _run_goal(client, goal, ctx, timeout, label, server="docking server"):
     while not client.server_is_ready():
         if ctx.cancelled.is_set():
             return canceled()
+        if closing.is_set():
+            return shutting()
         if time.monotonic() >= deadline:
             return ctx.aborted("GENERAL_FAILURE", f"{server} unavailable")
         ctx.cancelled.wait(_POLL_S)
@@ -54,8 +62,9 @@ def _run_goal(client, goal, ctx, timeout, label, server="docking server"):
     send.add_done_callback(lambda _: wake.set())
     if not wait(send, time.monotonic() + timeout):
         send.add_done_callback(_cancel_if_accepted)  # don't leak a goal accepted after we gave up
-        return canceled() if ctx.cancelled.is_set() else \
-            ctx.aborted("GENERAL_FAILURE", f"{label} goal response timeout")
+        if ctx.cancelled.is_set():
+            return canceled()
+        return shutting() if closing.is_set() else ctx.aborted("GENERAL_FAILURE", f"{label} goal response timeout")
     handle = send.result()  # OUR handle
     if not handle.accepted:
         return ctx.aborted("GENERAL_FAILURE", f"{label} goal rejected")
@@ -68,6 +77,10 @@ def _run_goal(client, goal, ctx, timeout, label, server="docking server"):
             _cancel_quietly(handle)
             wait(result, time.monotonic() + timeout)  # bounded wait for the server to finish it
             return canceled()
+        if closing.is_set():
+            _cancel_quietly(handle)
+            wait(result, time.monotonic() + timeout)
+            return shutting()
         if client.server_is_ready():
             lost_since = None
         elif lost_since is None:
@@ -125,6 +138,7 @@ class DockHandler:
         self.server_timeout_s = float(p["server_timeout_s"])
         self._active = 0
         self._lock = threading.Lock()  # leaf lock: guards _active updates only
+        self._closing = threading.Event()
         self._actions = _import_actions() if self.mode != "navigate" else None
         self._client = None
         if self.mode == "docking_server" and not self._actions:
@@ -142,7 +156,14 @@ class DockHandler:
         except Exception:
             log.exception("status refresh failed")
 
+    def close(self):
+        """Shutdown: a running dock cancels its own goal and ends ABORTED; new docks abort at once.
+        (The navigate fallback is stopped by node.nav.close().)"""
+        self._closing.set()
+
     def execute(self, action, ctx):
+        if self._closing.is_set():
+            return ctx.aborted("GENERAL_FAILURE", SHUTTING_DOWN)
         with self._lock:
             self._active += 1
         self._refresh()
@@ -160,7 +181,7 @@ class DockHandler:
             return True  # _run_goal bounds the wait and reports "server unavailable"
         deadline = time.monotonic() + self.server_timeout_s
         while not self._client.server_is_ready():
-            if ctx.cancelled.is_set() or time.monotonic() >= deadline:
+            if ctx.cancelled.is_set() or self._closing.is_set() or time.monotonic() >= deadline:
                 return False
             ctx.cancelled.wait(_POLL_S)
         return True
@@ -184,9 +205,11 @@ class DockHandler:
                 goal.use_dock_id = False
                 goal.dock_pose = nav_goal_pose(self.node.ccs, loc, None, self.node.map_frame)
                 goal.dock_type = self.dock_type
-            return _run_goal(self._client, goal, ctx, self.server_timeout_s, "dock")
+            return _run_goal(self._client, goal, ctx, self.server_timeout_s, "dock", closing=self._closing)
         if ctx.cancelled.is_set():  # e.g. cancelled during the auto-mode server probe
             return ctx.aborted("REJECTED", "canceled")
+        if self._closing.is_set():
+            return ctx.aborted("GENERAL_FAILURE", SHUTTING_DOWN)
         if not loc:
             return ctx.aborted("GENERAL_FAILURE", "dock: properties.dockLocation is required")
         pose = nav_goal_pose(self.node.ccs, loc, None, self.node.map_frame)
@@ -200,6 +223,7 @@ class UndockHandler:
         self.dock_type, self.server_timeout_s = p["dock_type"], float(p["server_timeout_s"])
         actions = _import_actions()
         self._actions = actions
+        self._closing = threading.Event()
         self._client = None
         if actions:
             self._client = ActionClient(node, actions[1], p["action"], callback_group=ReentrantCallbackGroup())
@@ -208,9 +232,16 @@ class UndockHandler:
     def available():
         return _import_actions() is not None
 
+    def close(self):
+        """Shutdown: a running undock cancels its own goal and ends ABORTED."""
+        self._closing.set()
+
     def execute(self, action, ctx):
+        if self._closing.is_set():
+            return ctx.aborted("GENERAL_FAILURE", SHUTTING_DOWN)
         if self._client is None:
             return ctx.aborted("GENERAL_FAILURE", "undock: UndockRobot is not available on this ROS distro")
         goal = self._actions[1].Goal()
         goal.dock_type = self.dock_type
-        return _run_goal(self._client, goal, ctx, self.server_timeout_s, "undock", "undocking server")
+        return _run_goal(self._client, goal, ctx, self.server_timeout_s, "undock", "undocking server",
+                         closing=self._closing)

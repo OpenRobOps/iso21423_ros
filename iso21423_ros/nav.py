@@ -18,6 +18,7 @@ from iso21423_ros.mappings import distance
 log = logging.getLogger(__name__)
 
 _POLL_S = 0.05  # ctx.cancelled has no callback hook, so waits poll it at this period
+SHUTTING_DOWN = "connector shutting down"
 
 
 class NavRunner:
@@ -28,6 +29,7 @@ class NavRunner:
         self.progress_min_interval_s = float(progress_min_interval_s)
         self._client = ActionClient(node, NavigateToPose, action_name, callback_group=ReentrantCallbackGroup())
         self._paused = False
+        self._closing = False
         self._busy = 0
         self._wakers = set()
         self._lock = threading.Lock()  # leaf lock: guards _busy and _wakers only
@@ -52,13 +54,21 @@ class NavRunner:
     def resume(self):
         self._set_paused(False)
 
+    def close(self):
+        """Shutdown: every navigate() cancels its own goal and ends ABORTED; new calls abort at once."""
+        self._closing = True
+        self._wake_all()
+
     def _set_paused(self, value):
         self._paused = value
+        self._wake_all()
+        self._refresh()
+
+    def _wake_all(self):
         with self._lock:
             wakers = list(self._wakers)
         for w in wakers:
             w.set()
-        self._refresh()
 
     def _refresh(self):
         try:
@@ -67,6 +77,8 @@ class NavRunner:
             log.exception("status refresh failed")
 
     def navigate(self, pose, ctx, tolerance_radius=None, target_xy=None):
+        if self._closing:
+            return ctx.aborted("GENERAL_FAILURE", SHUTTING_DOWN)
         wake = threading.Event()
         with self._lock:
             self._busy += 1
@@ -87,21 +99,28 @@ class NavRunner:
         def canceled():  # the executor maps REJECTED-after-cancel to CANCELED
             return ctx.aborted("REJECTED", "canceled")
 
+        def shutting():
+            return ctx.aborted("GENERAL_FAILURE", SHUTTING_DOWN)
+
         last_progress = [float("-inf")]
         while True:
             # 1. hold the objective while paused, no goal sent
-            while self._paused:
+            while self._paused and not self._closing:
                 if ctx.cancelled.is_set():
                     return canceled()
                 self._sleep(wake)
             if ctx.cancelled.is_set():
                 return canceled()
+            if self._closing:
+                return shutting()
 
             # 2. send our goal
             deadline = time.monotonic() + self.server_timeout_s
             while not self._client.server_is_ready():
                 if ctx.cancelled.is_set():
                     return canceled()
+                if self._closing:
+                    return shutting()
                 if time.monotonic() >= deadline:
                     return ctx.aborted("GENERAL_FAILURE", "navigate_to_pose server unavailable")
                 ctx.cancelled.wait(_POLL_S)
@@ -135,7 +154,9 @@ class NavRunner:
             if not self._wait(send, wake, deadline=time.monotonic() + self.server_timeout_s):
                 done.set()
                 send.add_done_callback(_cancel_if_accepted)  # don't leak a goal accepted after we gave up
-                return canceled() if ctx.cancelled.is_set() else \
+                if ctx.cancelled.is_set():
+                    return canceled()
+                return shutting() if self._closing else \
                     ctx.aborted("GENERAL_FAILURE", "navigate_to_pose goal response timeout")
             handle = send.result()  # OUR handle; the only one this call may cancel
             if not handle.accepted:
@@ -150,6 +171,10 @@ class NavRunner:
                     done.set()
                     self._cancel(handle, result, wake)
                     return canceled()
+                if self._closing:
+                    done.set()
+                    self._cancel(handle, result, wake)
+                    return shutting()
                 if inside.is_set():
                     done.set()
                     self._cancel(handle, result, wake)
