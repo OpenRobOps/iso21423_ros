@@ -1,0 +1,28 @@
+# Flatland + Nav2, an anonymous broker and the connector, for scripts/sim_test.sh.
+# Host networking like flatland's own compose; a private ROS domain and MQTT port 18830 keep it off
+# whatever else runs on the host.
+x-ros: &ros
+  network_mode: host
+  ipc: host   # FastDDS shared-memory transport between the containers
+  environment:
+    - ROS_DOMAIN_ID=${SIM_ROS_DOMAIN_ID:-42}
+
+services:
+  sim:
+    <<: *ros
+    image: ghcr.io/openrobops/flatland-nav2:latest
+    command: ["--no-rviz"]
+
+  broker:
+    image: eclipse-mosquitto:2
+    network_mode: host
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  connector:
+    <<: *ros
+    image: ${CONNECTOR_IMAGE:-iso21423-ros:sim}
+    depends_on: [broker, sim]
+    volumes:
+      - ./flatland_test.yaml:/robot.yaml:ro
+    command: ["ros2", "launch", "iso21423_ros", "connector.launch.py", "params_file:=/robot.yaml"]

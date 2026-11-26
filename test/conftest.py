@@ -6,6 +6,13 @@ import pytest
 from rclpy.executors import MultiThreadedExecutor
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_ignore_collect(path):
+    """Skip test/sim: host-run sim tests (scripts/sim_test.sh) and their venv. Not collect_ignore:
+    Jazzy's launch_testing plugin answers this hook False for every path, which overrides it."""
+    return True if path.basename == "sim" else None
+
+
 class Spinner:
     """Spins a MultiThreadedExecutor on a thread. stop() joins the thread before shutting the executor
     down: Executor.shutdown() racing a running spin() can hang or crash the spin thread."""

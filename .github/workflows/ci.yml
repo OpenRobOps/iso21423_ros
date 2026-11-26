@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # py-sdk lives on this branch until OpenRobOps/iso21423 PR #19 merges; switch it to main then.
+  ISO21423_REF: ros2-connector-design
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ROS_DISTRO: [jazzy, humble]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: iso21423_ros
+      - uses: actions/checkout@v4
+        with:
+          repository: OpenRobOps/iso21423
+          ref: ${{ env.ISO21423_REF }}
+          path: iso21423
+      - run: iso21423_ros/scripts/test.sh
+        env:
+          ROS_DISTRO: ${{ matrix.ROS_DISTRO }}
+
+  sim:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: iso21423_ros
+      - uses: actions/checkout@v4
+        with:
+          repository: OpenRobOps/iso21423
+          ref: ${{ env.ISO21423_REF }}
+          path: iso21423
+      - run: iso21423_ros/scripts/sim_test.sh
