@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:  # a new push to the same PR/branch cancels the superseded run
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # py-sdk lives on this branch until OpenRobOps/iso21423 PR #19 merges; switch it to main then.
   ISO21423_REF: ros2-connector-design
@@ -12,6 +16,7 @@ env:
 jobs:
   unit:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +36,10 @@ jobs:
 
   sim:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
+      - name: Free disk space  # the flatland image is ~6 GB
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v4
         with:
           path: iso21423_ros

@@ -21,7 +21,7 @@ ROOT = f"/ISO_21423/v1/IMR/{UID}"
 FLEET = str(uuid.uuid4())
 STARTUP = 240.0  # sim + Nav2 + connector up from cold
 WAIT = 60.0
-NAV = 120.0  # a cross-map drive
+NAV = 180.0  # a cross-map drive (~75 s locally; CI runners are slower)
 
 OFFICE_A = (3.0, 13.0)
 HALL_EAST = (15.0, 10.0)
@@ -34,7 +34,7 @@ _seq = itertools.count(1)
 
 class Fleet:
     def __init__(self):
-        self.c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"fleet-{FLEET[:8]}")
+        self.c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"fleet-{uuid.uuid4().hex[:8]}")
         self.msgs = []
         self.cond = threading.Condition()
         self.c.on_connect = lambda c, *a: c.subscribe(f"{ROOT}/#", 2)
@@ -53,12 +53,12 @@ class Fleet:
 
     def _on_message(self, c, ud, m):
         with self.cond:
-            self.msgs.append((m.topic, json.loads(m.payload) if m.payload else None))
+            self.msgs.append((m.topic, json.loads(m.payload) if m.payload else None, m.retain))
             self.cond.notify_all()
 
     def on(self, suffix):
         with self.cond:
-            return [p for t, p in self.msgs if t == ROOT + suffix and p is not None]
+            return [p for t, p, _ in self.msgs if t == ROOT + suffix and p is not None]
 
     def wait(self, pred, what, timeout=WAIT):
         with self.cond:
@@ -72,7 +72,7 @@ class Fleet:
 
     def states(self):
         s = self.on("/status")
-        return s[-1]["states"] if s else None
+        return s[-1]["states"] if s else []
 
     def xy(self):
         o = self.on("/odometry")
@@ -129,8 +129,10 @@ def fleet():
     try:
         f.wait(lambda: f.on("/identity"), "identity", STARTUP)
         f.wait(lambda: f.on("/odometry"), "first odometry (localized)", STARTUP)
-        # odometry comes up seconds before bt_navigator is active, and an inactive Nav2 rejects goals
-        # (the move ends ABORTED "goal rejected"): probe with a move in place until Nav2 takes one
+        # Readiness gate. Odometry comes up about a second before bt_navigator is active, and an
+        # inactive Nav2 rejects goals: the move ends ABORTED "goal rejected", which is correct
+        # connector behaviour. The gate hides that path from the tests below (no test covers it):
+        # probe with a move in place until Nav2 takes one.
         deadline = time.monotonic() + STARTUP
         while f.wait_terminal(f.move(f.xy())[0], WAIT) != "SUCCEEDED":
             assert time.monotonic() < deadline, "Nav2 never became active"
@@ -142,6 +144,13 @@ def fleet():
 
 
 def test_identity_and_telemetry(fleet):
+    late = Fleet()  # a subscriber arriving after registration is handed the retained identity
+    try:
+        late.wait(lambda: late.on("/identity"), "identity for a late subscriber")
+        assert [r for t, _, r in late.msgs if t == ROOT + "/identity"][0], "identity not retained"
+    finally:
+        late.c.disconnect()
+        late.c.loop_stop()
     ident = fleet.on("/identity")[-1]
     assert ident["id"] == UID
     caps = ident["capabilities"]
@@ -151,7 +160,7 @@ def test_identity_and_telemetry(fleet):
     assert odo["pose"]["locationPoint"]["ccsId"] == CCS
     fleet.wait(lambda: fleet.on("/batteryStatus"), "batteryStatus")
     assert 0 <= fleet.on("/batteryStatus")[-1]["batterySoc"] <= 1
-    assert fleet.states()[0] == "MODE_AUTO"
+    assert fleet.states()[:1] == ["MODE_AUTO"]
 
 
 def test_move_round_trip(fleet):

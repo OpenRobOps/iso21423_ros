@@ -1,16 +1,31 @@
 import contextlib
 import logging
 import threading
+from pathlib import Path
 
 import pytest
 from rclpy.executors import MultiThreadedExecutor
 
 
-@pytest.hookimpl(tryfirst=True)
-def pytest_ignore_collect(path):
-    """Skip test/sim: host-run sim tests (scripts/sim_test.sh) and their venv. Not collect_ignore:
-    Jazzy's launch_testing plugin answers this hook False for every path, which overrides it."""
-    return True if path.basename == "sim" else None
+SIM_DIR = Path(__file__).parent / "sim"
+
+
+def _in_sim(p):
+    """test/sim and everything under it: host-run sim tests (scripts/sim_test.sh) and their venv."""
+    p = Path(str(p))
+    return True if p == SIM_DIR or SIM_DIR in p.parents else None
+
+
+# Not collect_ignore: Jazzy's launch_testing plugin answers pytest_ignore_collect False (tryfirst) for
+# every path, which overrides collect_ignore, --ignore and norecursedirs. A conftest hook runs first.
+if int(pytest.__version__.split(".")[0]) >= 7:
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_ignore_collect(collection_path):
+        return _in_sim(collection_path)
+else:  # pytest 6 (Humble) has only the py.path argument
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_ignore_collect(path):
+        return _in_sim(path)
 
 
 class Spinner:
