@@ -255,8 +255,11 @@ def test_shutdown_cancels_in_flight_move(broker):
             t0 = time.monotonic()
         took = time.monotonic() - t0  # shutdown, inside the helper's exit
         assert fake.cancels == fake.goals, "the in-flight goal was not cancelled"
-        final = [st for st in fleet.on("/status") if st][-1]
-        assert final["status"] == "ABORTED" and "connector shutting down" in json.dumps(final), final
+        # the terminal status must reach the broker before the client closes: wait for it, don't
+        # read whatever arrived last
+        fleet.wait(lambda: any(st and st["status"] == "ABORTED" for st in fleet.on("/status")), "ABORTED")
+        final = next(st for st in fleet.on("/status") if st and st["status"] == "ABORTED")
+        assert "connector shutting down" in json.dumps(final), final
         assert took < 5, f"shutdown took {took:.1f}s"
     finally:
         fleet.stop()

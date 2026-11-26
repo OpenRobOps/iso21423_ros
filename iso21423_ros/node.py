@@ -231,7 +231,10 @@ class ConnectorNode(Node):
             log.warning("shutdown: startup build still running")
         closers = [self.nav, *self.handlers.values()]
         steps = [(f"close {type(h).__name__}", h.close) for h in closers if callable(getattr(h, "close", None))]
+        t0 = time.monotonic()
         steps.append(("wait for in-flight requests", self._wait_idle))
+        if self.entity:  # the library publishes terminal statuses on its own threads, after handlers return
+            steps.append(("wait for library terminal statuses", lambda: self._wait_library_idle(t0)))
         steps.append(("destroy subscriptions/timers", self._destroy_entities))
         steps += [(f"close {type(h).__name__}", h.close) for h in self.hooks if callable(getattr(h, "close", None))]
         if self.status:
@@ -246,6 +249,11 @@ class ConnectorNode(Node):
         with self._idle:
             if not self._idle.wait_for(lambda: self._inflight == 0, IDLE_WAIT_S):
                 log.warning("shutdown: %d request(s) still running after %.0fs", self._inflight, IDLE_WAIT_S)
+
+    def _wait_library_idle(self, t0):
+        timeout = max(0.5, IDLE_WAIT_S - (time.monotonic() - t0))
+        if not self.entity.wait_idle(timeout):
+            log.warning("shutdown: library still has active requests after %.1fs", timeout)
 
     def _destroy_entities(self):
         for s in list(self.subscriptions):
