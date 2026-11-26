@@ -148,3 +148,14 @@ def test_oro_api_key_from_env_when_no_file(monkeypatch):
     finally:
         srv.shutdown()
     assert c.url == "mqtt://h:1" and srv.seen_keys == ["env-key"]
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_oro_missing_or_empty_api_key_raises(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("ORO_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("ORO_API_KEY", value)
+    cfg = from_params({"entity_uuid": UUID, "credentials_provider": "openrobops", "oro.url": "http://127.0.0.1:1"})
+    with pytest.raises(Iso21423Error, match="ORO_API_KEY"):
+        credentials.resolve(cfg, sleep=lambda s: pytest.fail("must not retry"))

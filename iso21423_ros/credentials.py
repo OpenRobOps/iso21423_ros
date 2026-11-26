@@ -33,7 +33,10 @@ def _read(path):
 
 def _fetch_oro(cfg, stop, sleep):
     endpoint = f"{cfg.oro.url.rstrip('/')}/iso_mqtt_config"
-    body = json.dumps({"apiKey": _read(cfg.oro.api_key_file) if cfg.oro.api_key_file else os.environ["ORO_API_KEY"], "entityUuid": cfg.entity_uuid}).encode()
+    key = _read(cfg.oro.api_key_file) if cfg.oro.api_key_file else os.environ.get("ORO_API_KEY", "").strip()
+    if not key:
+        raise Iso21423Error("oro.api_key_file empty and ORO_API_KEY unset")
+    body = json.dumps({"apiKey": key, "entityUuid": cfg.entity_uuid}).encode()
     while True:
         if stop.is_set():
             raise Iso21423Error("credential fetch stopped")
