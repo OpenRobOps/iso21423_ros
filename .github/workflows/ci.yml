@@ -10,8 +10,7 @@ concurrency:  # a new push to the same PR/branch cancels the superseded run
   cancel-in-progress: true
 
 env:
-  # py-sdk lives on this branch until OpenRobOps/iso21423 PR #19 merges; switch it to main then.
-  ISO21423_REF: ros2-connector-design
+  ISO21423_REF: main
 
 jobs:
   unit:
